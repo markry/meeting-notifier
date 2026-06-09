@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  meeting-notifier LaunchAgent.
+
+  Placeholders are filled in by install_launchagent.py:
+    @LABEL@         e.g. net.ryland.meeting-notifier
+    @PROGRAM_ARGS@  pre-rendered <string> elements — either two (venv-python +
+                    poller.py source) or one (the bundled .app binary)
+    @WORKING_DIR@   absolute path to the working dir (where config.toml lives)
+    @STDOUT_LOG@    absolute path for stdout log file
+    @STDERR_LOG@    absolute path for stderr log file
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@</string>
+
+    <key>ProgramArguments</key>
+    <array>
+@PROGRAM_ARGS@
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@WORKING_DIR@</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Throttle restarts so a crash loop doesn't hammer the system. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>@STDOUT_LOG@</string>
+
+    <key>StandardErrorPath</key>
+    <string>@STDERR_LOG@</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

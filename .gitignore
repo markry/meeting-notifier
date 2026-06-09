@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Build artifacts (py2app)
+build/
+dist/
+*.dmg
+
+# User-specific config (might contain personal calendar names)
+config.toml
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+"""Setup / settings window for MeetingNotifier.
+
+Shown when the .app is launched as a foreground app (no CLI args or just from
+Finder). On Save: writes the user's choices to
+`~/.config/meeting-notifier/config.toml`, installs / restarts the LaunchAgent,
+then quits the GUI process. The background LaunchAgent keeps running.
+
+Distinct from the alert overlay: this is a NORMAL window — not always-on-top,
+not on all screens, not multi-Space. The user opens it, makes changes, hits
+Save. The "always on top across all screens / all Spaces" treatment is reserved
+for the meeting alerts themselves.
+
+Re-launching the .app shows the same window with current settings pre-loaded,
+so it doubles as the settings panel.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+import objc
+from AppKit import (
+    NSApp, NSApplication, NSApplicationActivationPolicyRegular,
+    NSWindow, NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
+    NSWindowStyleMaskMiniaturizable, NSBackingStoreBuffered,
+    NSColor, NSFont, NSTextField, NSButton, NSButtonTypeSwitch,
+    NSBezelStyleRounded, NSScrollView, NSScrollerStyleLegacy,
+    NSView, NSPopUpButton,
+    NSScreen, NSAlert, NSAlertStyleInformational,
+)
+from Foundation import NSObject, NSMakeRect, NSMakeSize, NSMakePoint
+from EventKit import EKEventStore, EKEntityTypeEvent
+
+# Use the existing request_access helper from poller.py so we get the same
+# macOS-version-aware logic (full-access vs. legacy entity-type call).
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from poller import request_access  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Paths + constants
+# ---------------------------------------------------------------------------
+
+
+CONFIG_DIR = Path.home() / ".config" / "meeting-notifier"
+CONFIG_PATH = CONFIG_DIR / "config.toml"
+LAUNCHAGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LOG_DIR = Path.home() / "Library" / "Logs" / "meeting-notifier"
+LABEL = "net.ryland.meeting-notifier"
+
+# Window dimensions
+WIN_W = 720
+WIN_H = 670
+PAD = 20
+
+
+# ---------------------------------------------------------------------------
+# Settings model (loaded from disk; saved by the GUI)
+# ---------------------------------------------------------------------------
+
+
+DEFAULTS = {
+    "lead_time_minutes": 5,
+    "poll_interval_seconds": 60,
+    "lookahead_seconds": 900,
+    "snooze_minutes": 2,
+    "alert_timeout_seconds": 0,
+    "display_mode": "all",
+    "all_spaces": True,
+    "show_location": True,
+    "show_join_link": True,
+    "skip_all_day": True,
+    "skip_unaccepted_meetings": False,
+    "notify_in_progress_meetings": False,
+    "skip_title_substrings": ["OOO", "Out of Office", "Birthday"],
+}
+
+
+def load_settings() -> dict:
+    """Read the existing config.toml, falling back to defaults."""
+    settings = dict(DEFAULTS)
+    settings["calendars"] = []  # list of {"title": ..., "source": ...} dicts
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            return settings
+        for k in DEFAULTS:
+            if k in data:
+                settings[k] = data[k]
+        for entry in data.get("calendars", []):
+            settings["calendars"].append({
+                "title":  entry.get("title"),
+                "source": entry.get("source"),
+            })
+    return settings
+
+
+def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
+    """Write the config to ~/.config/meeting-notifier/config.toml in our schema.
+
+    `watched_calendars` is a list of {"title": str, "source": str|None} dicts.
+    """
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Meeting Notifier configuration.",
+        "# Written by the setup GUI. You can hand-edit it, but re-running the GUI",
+        "# will overwrite your changes.",
+        "",
+        f"lead_time_minutes = {int(settings['lead_time_minutes'])}",
+        f"poll_interval_seconds = {int(settings['poll_interval_seconds'])}",
+        f"lookahead_seconds = {int(settings['lookahead_seconds'])}",
+        f"snooze_minutes = {int(settings['snooze_minutes'])}",
+        f"alert_timeout_seconds = {int(settings['alert_timeout_seconds'])}",
+        f'display_mode = "{settings["display_mode"]}"',
+        f"all_spaces = {'true' if settings['all_spaces'] else 'false'}",
+        f"show_location = {'true' if settings['show_location'] else 'false'}",
+        f"show_join_link = {'true' if settings['show_join_link'] else 'false'}",
+        f"skip_all_day = {'true' if settings['skip_all_day'] else 'false'}",
+        f"skip_unaccepted_meetings = {'true' if settings['skip_unaccepted_meetings'] else 'false'}",
+        f"notify_in_progress_meetings = {'true' if settings['notify_in_progress_meetings'] else 'false'}",
+        "skip_title_substrings = " + _toml_string_list(settings["skip_title_substrings"]),
+        "",
+    ]
+    for cal in watched_calendars:
+        lines.append("[[calendars]]")
+        lines.append(f'title = "{_escape(cal["title"])}"')
+        if cal.get("source"):
+            lines.append(f'source = "{_escape(cal["source"])}"')
+        lines.append("")
+    CONFIG_PATH.write_text("\n".join(lines))
+
+
+def _toml_string_list(items: list[str]) -> str:
+    inner = ", ".join(f'"{_escape(s)}"' for s in items)
+    return f"[{inner}]"
+
+
+def _escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# ---------------------------------------------------------------------------
+# LaunchAgent management (embedded so the .app is self-contained)
+# ---------------------------------------------------------------------------
+
+
+def _plist_contents(app_path: Path) -> str:
+    binary = app_path / "Contents" / "MacOS" / "MeetingNotifier"
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{binary}</string>
+        <string>--daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>{LOG_DIR / 'stdout.log'}</string>
+    <key>StandardErrorPath</key>
+    <string>{LOG_DIR / 'stderr.log'}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
+"""
+
+
+def install_or_restart_launchagent(app_path: Path) -> None:
+    """Write the plist, bootout if loaded, then bootstrap + kickstart."""
+    LAUNCHAGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    plist_path = LAUNCHAGENTS_DIR / f"{LABEL}.plist"
+    domain = f"gui/{os.getuid()}"
+    target = f"{domain}/{LABEL}"
+
+    # bootout if already loaded
+    r = subprocess.run(["launchctl", "print", target],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        subprocess.run(["launchctl", "bootout", target], capture_output=True)
+        time.sleep(1)  # launchd needs a moment to release the label
+
+    plist_path.write_text(_plist_contents(app_path))
+    subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)],
+                   check=True)
+    subprocess.run(["launchctl", "kickstart", "-k", target], check=False)
+
+
+def detect_app_path() -> Path:
+    """When the GUI runs inside a py2app bundle, sys.executable is
+    <App>.app/Contents/MacOS/<binary>. Walking two parents up gives the .app
+    directory itself, which is what the LaunchAgent ProgramArguments needs."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent.parent.parent
+    # Source mode (running poller/setup_gui directly via venv) — point at the
+    # source project as a stand-in. The user would manually adjust the
+    # ProgramArguments if they really want to run the source via launchd.
+    return HERE
+
+
+# ---------------------------------------------------------------------------
+# The window
+# ---------------------------------------------------------------------------
+
+
+class SettingsWindow(NSObject):
+    """Owns the settings NSWindow + tracks control state."""
+
+    def init(self):
+        self = objc.super(SettingsWindow, self).init()
+        if self is None:
+            return None
+        self._settings = load_settings()
+        self._calendar_rows = []  # list of (NSButton checkbox, EKCalendar)
+        self._field_controls = {}  # name → NSTextField
+        self._switch_controls = {}  # name → NSButton (switch style)
+        self._display_popup = None
+        self._save_button = None
+        self._cancel_button = None
+        self._status_label = None
+        return self
+
+    # ----- public entry -----
+
+    def startSetup_(self, sender):
+        """Entry point called once NSApp.run() is active.
+
+        Calling request_access() before the main runloop has started leaves
+        the app in a half-activated state that Sequoia's tccd refuses to show
+        a permission dialog into. By deferring to a performSelectorAfterDelay,
+        we land here from inside the running NSApp loop with the app properly
+        in the foreground — at which point requestFullAccessToEventsWithCompletion_
+        can actually surface the system Allow/Don't Allow prompt.
+        """
+        NSApp.activateIgnoringOtherApps_(True)
+        self._build()
+
+    @objc.python_method
+    def _build(self):
+        store = EKEventStore.alloc().init()
+        if not request_access(store):
+            self._show_modal_alert(
+                "Calendar permission needed",
+                "MeetingNotifier needs access to your local calendars to "
+                "alert you before meetings.\n\n"
+                "If macOS didn't show a permission prompt, your system may be "
+                "caching a denial. Run this in Terminal to reset and try again:\n\n"
+                "    tccutil reset Calendar net.ryland.meeting-notifier\n\n"
+                "Otherwise, grant access in System Settings → Privacy & "
+                "Security → Calendars and relaunch."
+            )
+            # Exit cleanly so the user doesn't end up with a phantom Dock icon
+            # and no window after dismissing the alert.
+            NSApp.terminate_(None)
+            return
+        calendars = list(store.calendarsForEntityType_(EKEntityTypeEvent))
+        # Sort: first all writable + non-system, alphabetical
+        calendars.sort(key=lambda c: (
+            0 if c.allowsContentModifications() else 1,
+            str(c.title()).lower(),
+        ))
+        self._build_window(calendars)
+        self._window.makeKeyAndOrderFront_(None)
+
+    # ----- layout -----
+
+    @objc.python_method
+    def _build_window(self, calendars):
+        # Centered on the main screen, with a normal title bar (NOT always-on-top).
+        screen = NSScreen.mainScreen()
+        sf = screen.visibleFrame()
+        win_x = sf.origin.x + (sf.size.width  - WIN_W) / 2
+        win_y = sf.origin.y + (sf.size.height - WIN_H) / 2
+
+        mask = (NSWindowStyleMaskTitled |
+                NSWindowStyleMaskClosable |
+                NSWindowStyleMaskMiniaturizable)
+        win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(win_x, win_y, WIN_W, WIN_H),
+            mask, NSBackingStoreBuffered, False,
+        )
+        win.setTitle_("Meeting Notifier — Setup")
+        win.setReleasedWhenClosed_(False)
+        content = win.contentView()
+        self._window = win
+
+        y = WIN_H - PAD - 30
+        # Title
+        title = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD, y, WIN_W - 2 * PAD, 30))
+        title.setStringValue_("Meeting Notifier")
+        title.setFont_(NSFont.boldSystemFontOfSize_(22))
+        title.setBezeled_(False)
+        title.setDrawsBackground_(False)
+        title.setEditable_(False)
+        title.setSelectable_(False)
+        content.addSubview_(title)
+        y -= 30
+
+        intro = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD, y, WIN_W - 2 * PAD, 20))
+        intro.setStringValue_(
+            "Choose which calendars to watch and tune how alerts behave. "
+            "Click Save to apply.")
+        intro.setFont_(NSFont.systemFontOfSize_(13))
+        intro.setTextColor_(NSColor.secondaryLabelColor())
+        intro.setBezeled_(False)
+        intro.setDrawsBackground_(False)
+        intro.setEditable_(False)
+        intro.setSelectable_(False)
+        content.addSubview_(intro)
+        y -= 30
+
+        # Calendars section header
+        header = self._make_section_header(
+            NSMakeRect(PAD, y, WIN_W - 2 * PAD, 18),
+            "Calendars to watch")
+        content.addSubview_(header)
+        y -= 22
+
+        # Scrollable list of calendar checkboxes. Show ~4 rows by default;
+        # scroll vertically when the user has more calendars. Keeps the window
+        # short enough to fit even when the user has cranked up macOS Display
+        # → "Larger Text" mode (which shrinks the screen's effective point count).
+        row_h = 24
+        visible_rows = 4
+        list_h = visible_rows * row_h + 8
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(PAD, y - list_h, WIN_W - 2 * PAD, list_h))
+        scroll.setHasVerticalScroller_(True)
+        # Force "legacy" non-overlay scrollers so the bar is visible at a glance
+        # even when the user's system pref is "Show scroll bars: only when
+        # scrolling" (the trackpad default). Otherwise a clipped list looks
+        # incomplete instead of scrollable.
+        scroll.setScrollerStyle_(NSScrollerStyleLegacy)
+        scroll.setAutohidesScrollers_(False)
+        scroll.setBorderType_(2)  # NSBezelBorder
+        inner_h = max(list_h, len(calendars) * row_h + 4)
+        inner = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, WIN_W - 2 * PAD - 20, inner_h))
+
+        # Build a set of (title, source) currently watched, for pre-checking
+        watched_keys = {
+            (c["title"], c.get("source"))
+            for c in self._settings.get("calendars", [])
+        }
+
+        for i, cal in enumerate(calendars):
+            cb = NSButton.alloc().initWithFrame_(
+                NSMakeRect(6, inner_h - (i + 1) * row_h, WIN_W - 2 * PAD - 40, row_h - 2))
+            cb.setButtonType_(NSButtonTypeSwitch)
+            src_title = str(cal.source().title()) if cal.source() else ""
+            label = str(cal.title())
+            if src_title:
+                label = f"{label}   ·   {src_title}"
+            cb.setTitle_(label)
+            # Pre-check if this (title, source) is already watched
+            key = (str(cal.title()), src_title or None)
+            if key in watched_keys or (str(cal.title()), None) in watched_keys:
+                cb.setState_(1)
+            inner.addSubview_(cb)
+            self._calendar_rows.append((cb, cal))
+        scroll.setDocumentView_(inner)
+        content.addSubview_(scroll)
+        # Cocoa scroll views default to showing the BOTTOM of the document
+        # view (because the unflipped coordinate system puts (0,0) at the
+        # bottom-left). Our rows are laid out top-down, so without this the
+        # window opens looking at calendars 3-4 instead of 0-1. Scroll the
+        # clip view to put the top of the document in view.
+        if inner_h > list_h:
+            clip = scroll.contentView()
+            clip.scrollToPoint_(NSMakePoint(0, inner_h - list_h))
+            scroll.reflectScrolledClipView_(clip)
+        y -= list_h + PAD
+
+        # Timing section
+        y = self._add_section_header(content, y, "Timing")
+        y = self._add_int_field(content, y, "lead_time_minutes",
+                                "Lead time (minutes before meeting)",
+                                "How many minutes before the meeting starts to fire the alert.")
+        y = self._add_int_field(content, y, "snooze_minutes",
+                                "Snooze button duration (minutes)",
+                                "How long Snooze defers the alert before re-firing.")
+        y = self._add_int_field(content, y, "alert_timeout_seconds",
+                                "Auto-dismiss after (seconds, 0 = never)",
+                                "Alert auto-closes after this many seconds of no interaction. 0 means it stays up indefinitely.")
+
+        # Display section
+        y = self._add_section_header(content, y, "Display")
+        y = self._add_popup(content, y, "display_mode",
+                            "Show alert on",
+                            [("all", "All connected displays"),
+                             ("main", "Main display only"),
+                             ("focused", "Display with the focused app")])
+        y = self._add_switch(content, y, "all_spaces",
+                             "Show across all Spaces (including full-screen apps)")
+
+        # Filtering section
+        y = self._add_section_header(content, y, "Filtering")
+        y = self._add_switch(content, y, "skip_all_day",
+                             "Skip all-day events")
+        y = self._add_switch(content, y, "skip_unaccepted_meetings",
+                             "Skip tentative / pending invitations (alert only for accepted meetings)")
+        y = self._add_switch(content, y, "notify_in_progress_meetings",
+                             "Also alert for meetings already in progress when first discovered")
+
+        # Save / Quit buttons at the bottom
+        btn_w = 120
+        btn_h = 32
+        btn_y = PAD
+        save_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(WIN_W - PAD - btn_w, btn_y, btn_w, btn_h))
+        save_btn.setTitle_("Save & Start")
+        save_btn.setBezelStyle_(NSBezelStyleRounded)
+        save_btn.setKeyEquivalent_("\r")
+        save_btn.setTarget_(self)
+        save_btn.setAction_("save:")
+        content.addSubview_(save_btn)
+        self._save_button = save_btn
+
+        cancel_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(WIN_W - PAD - btn_w * 2 - 12, btn_y, btn_w, btn_h))
+        cancel_btn.setTitle_("Cancel")
+        cancel_btn.setBezelStyle_(NSBezelStyleRounded)
+        cancel_btn.setTarget_(self)
+        cancel_btn.setAction_("cancel:")
+        content.addSubview_(cancel_btn)
+        self._cancel_button = cancel_btn
+
+        status = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD, btn_y + 6, WIN_W - PAD * 2 - btn_w * 2 - 24, 18))
+        status.setBezeled_(False)
+        status.setDrawsBackground_(False)
+        status.setEditable_(False)
+        status.setSelectable_(False)
+        status.setFont_(NSFont.systemFontOfSize_(12))
+        status.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(status)
+        self._status_label = status
+
+    # ----- helpers for laying out form rows -----
+
+    @objc.python_method
+    def _make_section_header(self, rect, text):
+        lbl = NSTextField.alloc().initWithFrame_(rect)
+        lbl.setStringValue_(text)
+        lbl.setFont_(NSFont.boldSystemFontOfSize_(13))
+        lbl.setBezeled_(False)
+        lbl.setDrawsBackground_(False)
+        lbl.setEditable_(False)
+        lbl.setSelectable_(False)
+        return lbl
+
+    @objc.python_method
+    def _add_section_header(self, content, y, text):
+        header = self._make_section_header(
+            NSMakeRect(PAD, y - 18, WIN_W - 2 * PAD, 18), text)
+        content.addSubview_(header)
+        return y - 24
+
+    @objc.python_method
+    def _add_int_field(self, content, y, key, label, helptext):
+        lbl = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD, y - 20, 280, 20))
+        lbl.setStringValue_(label)
+        lbl.setBezeled_(False)
+        lbl.setDrawsBackground_(False)
+        lbl.setEditable_(False)
+        lbl.setSelectable_(False)
+        lbl.setFont_(NSFont.systemFontOfSize_(13))
+        content.addSubview_(lbl)
+
+        field = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD + 290, y - 22, 70, 22))
+        field.setStringValue_(str(self._settings.get(key, DEFAULTS[key])))
+        content.addSubview_(field)
+        self._field_controls[key] = field
+
+        help_lbl = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD + 370, y - 20, WIN_W - PAD * 2 - 370, 18))
+        help_lbl.setStringValue_(helptext)
+        help_lbl.setBezeled_(False)
+        help_lbl.setDrawsBackground_(False)
+        help_lbl.setEditable_(False)
+        help_lbl.setSelectable_(False)
+        help_lbl.setFont_(NSFont.systemFontOfSize_(11))
+        help_lbl.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(help_lbl)
+        return y - 30
+
+    @objc.python_method
+    def _add_popup(self, content, y, key, label, options):
+        lbl = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(PAD, y - 20, 280, 20))
+        lbl.setStringValue_(label)
+        lbl.setBezeled_(False)
+        lbl.setDrawsBackground_(False)
+        lbl.setEditable_(False)
+        lbl.setSelectable_(False)
+        lbl.setFont_(NSFont.systemFontOfSize_(13))
+        content.addSubview_(lbl)
+
+        popup = NSPopUpButton.alloc().initWithFrame_(
+            NSMakeRect(PAD + 290, y - 24, 280, 26))
+        current = self._settings.get(key, DEFAULTS[key])
+        for (val, title) in options:
+            popup.addItemWithTitle_(title)
+            item = popup.lastItem()
+            item.setRepresentedObject_(val)
+            if val == current:
+                popup.selectItem_(item)
+        content.addSubview_(popup)
+        self._display_popup = popup
+        return y - 32
+
+    @objc.python_method
+    def _add_switch(self, content, y, key, label):
+        cb = NSButton.alloc().initWithFrame_(
+            NSMakeRect(PAD, y - 22, WIN_W - 2 * PAD, 22))
+        cb.setButtonType_(NSButtonTypeSwitch)
+        cb.setTitle_(label)
+        if self._settings.get(key, DEFAULTS[key]):
+            cb.setState_(1)
+        content.addSubview_(cb)
+        self._switch_controls[key] = cb
+        return y - 28
+
+    @objc.python_method
+    def _show_modal_alert(self, title, body):
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(body)
+        alert.setAlertStyle_(NSAlertStyleInformational)
+        alert.runModal()
+
+    # ----- save / cancel actions -----
+
+    @objc.python_method
+    def _collect(self) -> tuple[dict, list[dict]]:
+        settings = dict(self._settings)
+        for key, field in self._field_controls.items():
+            raw = str(field.stringValue() or "0").strip()
+            try:
+                settings[key] = int(raw)
+            except ValueError:
+                settings[key] = DEFAULTS[key]
+        for key, switch in self._switch_controls.items():
+            settings[key] = bool(switch.state())
+        if self._display_popup is not None:
+            sel = self._display_popup.selectedItem()
+            if sel is not None and sel.representedObject() is not None:
+                settings["display_mode"] = str(sel.representedObject())
+        watched = []
+        for cb, cal in self._calendar_rows:
+            if cb.state():
+                src = cal.source()
+                watched.append({
+                    "title":  str(cal.title()),
+                    "source": str(src.title()) if src else None,
+                })
+        return settings, watched
+
+    def save_(self, sender):
+        settings, watched = self._collect()
+        if not watched:
+            self._show_modal_alert(
+                "Pick at least one calendar",
+                "Check the box next to one or more calendars you want "
+                "MeetingNotifier to watch.")
+            return
+        try:
+            save_settings(settings, watched)
+        except Exception as exc:
+            self._show_modal_alert("Couldn't save config", str(exc))
+            return
+        # Disable buttons so a frustrated double-click can't re-enter.
+        if self._save_button:
+            self._save_button.setEnabled_(False)
+        if self._cancel_button:
+            self._cancel_button.setEnabled_(False)
+        if getattr(sys, "frozen", False):
+            # Bundled .app: install/restart the LaunchAgent. Defer to the next
+            # runloop tick so the status update paints before we block on
+            # launchctl — otherwise the window appears frozen and the user
+            # thinks "click did nothing".
+            if self._status_label:
+                self._status_label.setStringValue_("Installing background agent…")
+            self.performSelector_withObject_afterDelay_("doInstall:", None, 0.1)
+        else:
+            # Source mode (running setup_gui.py via venv python). The detected
+            # "app path" points at the source dir which doesn't have a real
+            # binary, so writing a LaunchAgent plist here would be broken.
+            # Just confirm the config write and quit.
+            if self._status_label:
+                self._status_label.setStringValue_(
+                    "Config saved. Restart your background poller to apply.")
+            self.performSelector_withObject_afterDelay_("doQuit:", None, 0.7)
+
+    def doInstall_(self, sender):
+        try:
+            install_or_restart_launchagent(detect_app_path())
+        except Exception as exc:
+            self._show_modal_alert(
+                "Couldn't (re)start the background agent",
+                f"Config saved to {CONFIG_PATH}, but the LaunchAgent "
+                f"install/restart failed:\n\n{exc}\n\nYou can install it "
+                "manually with the CLI tools described in the README.")
+            # Re-enable buttons so user can retry or cancel out.
+            if self._save_button:
+                self._save_button.setEnabled_(True)
+            if self._cancel_button:
+                self._cancel_button.setEnabled_(True)
+            return
+        NSApp.terminate_(None)
+
+    def doQuit_(self, sender):
+        NSApp.terminate_(None)
+
+    def cancel_(self, sender):
+        # Defer terminate by one runloop tick so the button click visibly
+        # registers before the app exits — avoids the impression of an SBOD.
+        if self._save_button:
+            self._save_button.setEnabled_(False)
+        if self._cancel_button:
+            self._cancel_button.setEnabled_(False)
+        self.performSelector_withObject_afterDelay_("doQuit:", None, 0.05)
+
+
+# ---------------------------------------------------------------------------
+# Public entry
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    app = NSApplication.sharedApplication()
+    # Regular activation policy = dock icon + menu bar, like any normal app.
+    # We're not running as background-only here.
+    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    controller = SettingsWindow.alloc().init()
+    # Defer the permission request + window build until AFTER NSApp.run()
+    # is pumping the main runloop and the app is fully foreground. macOS
+    # Sequoia's tccd will not surface the Calendar permission dialog if the
+    # app hasn't reached this state by the time of the request.
+    controller.performSelector_withObject_afterDelay_("startSetup:", None, 0.1)
+    app.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

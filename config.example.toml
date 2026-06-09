@@ -1,0 +1,122 @@
+# meeting-notifier configuration
+#
+# Copy this file to `config.toml` and customize. The poller looks for `config.toml`
+# alongside the poller script (and falls back to `~/.config/meeting-notifier/config.toml`).
+#
+# Run `python3 list_calendars.py` to see which calendars are available on this machine.
+
+
+# ---- Timing ----------------------------------------------------------------
+
+# How many minutes before a meeting starts to show the alert.
+lead_time_minutes = 5
+
+# How often the poller checks for upcoming events (seconds).
+poll_interval_seconds = 60
+
+# How far in the future to look when querying events (seconds). Should be larger
+# than lead_time_minutes * 60 + poll_interval_seconds so events don't slip through.
+lookahead_seconds = 900   # 15 minutes
+
+# When the user clicks "Snooze N min", how many minutes to wait before the alert
+# re-fires. Drives both the button label and the snooze duration. After the
+# snooze elapses, the alert fires once more regardless of whether the meeting
+# has already started.
+snooze_minutes = 2
+
+# Auto-dismiss the alert after this many seconds with no interaction.
+# Set to 0 (the default) to disable auto-dismiss — the alert stays up
+# until you explicitly click Dismiss or Snooze. Useful if you might step
+# away from your desk and want the alert to still be visible when you
+# come back, even if the meeting has already started.
+alert_timeout_seconds = 0
+
+# Which display(s) the alert appears on:
+#   "all"     — one alert window on every connected display (the default —
+#               you can't miss the alert because you were looking at a
+#               different monitor)
+#   "main"    — primary display only (the one with the menu bar)
+#   "focused" — the display containing the currently-focused app
+display_mode = "all"
+
+# Show the alert on every macOS Space simultaneously, including overlaying
+# full-screen apps. Default true so a Space switch or full-screen Zoom call
+# doesn't make you miss your next meeting.
+all_spaces = true
+
+
+# ---- Calendars to watch ----------------------------------------------------
+
+# Each calendar to watch is ONE `[[calendars]]` block. To watch multiple
+# calendars, REPEAT THE `[[calendars]]` HEADER for each entry — DO NOT just
+# add more `title=` / `source=` lines under the first block (TOML treats
+# duplicate keys in the same block as overwrites, not as another entry).
+#
+# Right way (two calendars):
+#
+#     [[calendars]]
+#     title = "Work"
+#     source = "iCloud"
+#
+#     [[calendars]]
+#     title = "Personal"
+#
+# Wrong way (silently becomes ONE entry):
+#
+#     [[calendars]]
+#     title = "Work"
+#     title = "Personal"       # overwrites the first
+#
+# Match by ONE of:
+#   - `title` (human-readable; breaks if you rename the calendar in Calendar.app)
+#   - `identifier` (EKCalendar UUID; survives renames; less readable)
+#
+# Optional `source` further disambiguates when multiple calendars share a title
+# across different accounts (e.g., two "Personal" calendars from Exchange + iCloud).
+# Run `MeetingNotifier --list` to see all available calendars on your machine.
+
+[[calendars]]
+title = "Calendar"
+source = "Ryland.net"   # optional; omit to match any source with the given title
+
+# Second example — uncomment + edit:
+# [[calendars]]
+# title = "personal@gmail.com"
+# source = "Google"
+
+# Or pin by identifier (UUID; rename-proof):
+# [[calendars]]
+# identifier = "AD8A50E8-FB39-4141-B44A-B1668FB6300E"
+
+
+# ---- Filtering -------------------------------------------------------------
+
+# Skip events whose title matches any of these patterns (case-insensitive substring).
+# Useful for hiding all-day reminders or "OOO" blocks you don't need pinged about.
+skip_title_substrings = ["OOO", "Out of Office", "Birthday"]
+
+# Skip all-day events (typically holidays, birthdays, OOO blocks).
+skip_all_day = true
+
+# Skip meetings the user hasn't accepted (Tentative / Pending / Declined
+# invitations). Self-created events with no attendee list are treated as
+# accepted — they're not invitations, just calendar entries. Default false
+# fires on everything that lives on the calendar.
+skip_unaccepted_meetings = false
+
+# Catch in-progress meetings: also fire one alert for any meeting that's
+# currently running (started in the past, not yet ended) the first time the
+# poller sees it. Useful when the notifier just started up mid-day and you
+# want to be reminded of what's going on right now. Default false keeps the
+# classic "alert only before the meeting starts" behavior.
+notify_in_progress_meetings = false
+
+
+# ---- Alert content ---------------------------------------------------------
+
+# Whether to show the meeting location below the title (when present).
+show_location = true
+
+# Whether to extract the first URL from the event body/location as a "join link"
+# (Zoom, Meet, Teams, etc.) and show it.
+show_join_link = true

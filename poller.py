@@ -1,0 +1,625 @@
+#!/usr/bin/env python3
+"""meeting-notifier poller core.
+
+Polls Apple Calendar.app (via EventKit) for upcoming events in user-configured
+calendars and fires an alert `lead_time_minutes` before each event starts.
+
+Current state: alert dispatch is a STUB that prints to stdout. The real overlay
+window comes in the next phase. This file is structured so that swapping the
+print-stub for the real overlay is a one-function change.
+
+Usage:
+    python3 poller.py [--config PATH] [--once] [--list]
+
+Flags:
+    --config PATH   Use a specific config file (default: ./config.toml, then
+                    ~/.config/meeting-notifier/config.toml)
+    --once          Run one poll cycle and exit (good for cron/launchd diagnostics)
+    --list          Print the discovered calendars (like list_calendars.py) and exit
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import time
+import platform
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+import subprocess
+
+from EventKit import EKEventStore, EKEntityTypeEvent
+from Foundation import NSRunLoop, NSDate
+
+from overlay import AlertInfo  # only the data class — the alert subprocess
+                                # handles the actual NSWindow rendering
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CalendarMatch:
+    """One entry under [[calendars]] in config.toml."""
+    title: str | None = None
+    identifier: str | None = None
+    source: str | None = None
+
+    def matches(self, cal) -> bool:
+        """True if the given EKCalendar matches this config entry."""
+        if self.identifier:
+            return str(cal.calendarIdentifier()) == self.identifier
+        if self.title and str(cal.title()) != self.title:
+            return False
+        if self.source:
+            src = cal.source()
+            return bool(src and str(src.title()) == self.source)
+        # title-only and matched: yes
+        return self.title is not None
+
+
+@dataclass
+class Config:
+    lead_time_minutes: int = 5
+    poll_interval_seconds: int = 60
+    lookahead_seconds: int = 900
+    snooze_minutes: int = 2
+    # Auto-dismiss after N seconds if the user doesn't interact. 0 = never
+    # auto-dismiss (alert stays up until clicked — the default, so you can
+    # still see the alert if you were away from your desk when it fired).
+    alert_timeout_seconds: int = 0
+    # Which displays the alert appears on:
+    #   "all"     — every connected display (default; can't miss an alert
+    #               because you were looking at a different monitor)
+    #   "main"    — primary display only
+    #   "focused" — the display showing the currently-focused app
+    display_mode: str = "all"
+    # Show the alert on every macOS Space simultaneously, including overlaying
+    # full-screen apps. Default True so you don't miss alerts when switched
+    # away from your normal Space.
+    all_spaces: bool = True
+    # When True, fire one alert for any meeting that's currently in progress
+    # (started in the past, hasn't ended yet) the first time the poller sees
+    # it. Useful for the "notifier just started up mid-day and there's already
+    # a meeting running" case. Default False preserves classic pre-meeting-only
+    # behavior. Snoozed re-fires already ignore the lead-time window, so this
+    # only changes the initial-fire path.
+    notify_in_progress_meetings: bool = False
+    # When True, skip events the user hasn't accepted (Tentative / Pending /
+    # Declined invitations). Events with no attendees array — typically things
+    # the user put on their own calendar without an invite flow — are treated
+    # as accepted and NOT skipped. Default False preserves current "alert on
+    # everything that lives on the calendar" behavior.
+    skip_unaccepted_meetings: bool = False
+    use_overlay: bool = True   # False = print-stub (for headless / testing)
+    calendars: list[CalendarMatch] = field(default_factory=list)
+    skip_title_substrings: list[str] = field(default_factory=list)
+    skip_all_day: bool = True
+    show_location: bool = True
+    show_join_link: bool = True
+
+
+def load_config(path: Path) -> Config:
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    cfg = Config(
+        lead_time_minutes=int(data.get("lead_time_minutes", 5)),
+        poll_interval_seconds=int(data.get("poll_interval_seconds", 60)),
+        lookahead_seconds=int(data.get("lookahead_seconds", 900)),
+        snooze_minutes=int(data.get("snooze_minutes", 2)),
+        alert_timeout_seconds=int(data.get("alert_timeout_seconds", 0)),
+        display_mode=str(data.get("display_mode", "all")),
+        all_spaces=bool(data.get("all_spaces", True)),
+        notify_in_progress_meetings=bool(data.get("notify_in_progress_meetings", False)),
+        skip_unaccepted_meetings=bool(data.get("skip_unaccepted_meetings", False)),
+        use_overlay=bool(data.get("use_overlay", True)),
+        skip_title_substrings=list(data.get("skip_title_substrings", [])),
+        skip_all_day=bool(data.get("skip_all_day", True)),
+        show_location=bool(data.get("show_location", True)),
+        show_join_link=bool(data.get("show_join_link", True)),
+    )
+    for entry in data.get("calendars", []):
+        cfg.calendars.append(CalendarMatch(
+            title=entry.get("title"),
+            identifier=entry.get("identifier"),
+            source=entry.get("source"),
+        ))
+    if not cfg.calendars:
+        raise SystemExit(
+            f"config at {path} defines no [[calendars]] entries; nothing to watch")
+    return cfg
+
+
+def find_config(explicit: Path | None) -> Path:
+    if explicit:
+        if not explicit.exists():
+            raise SystemExit(f"--config path does not exist: {explicit}")
+        return explicit
+    here = Path(__file__).resolve().parent / "config.toml"
+    if here.exists():
+        return here
+    xdg = Path(os.environ.get(
+        "XDG_CONFIG_HOME",
+        Path.home() / ".config")) / "meeting-notifier" / "config.toml"
+    if xdg.exists():
+        return xdg
+    raise SystemExit(
+        "No config.toml found. Copy config.example.toml to config.toml "
+        "and edit it. Searched: " + ", ".join(str(p) for p in [here, xdg]))
+
+
+# ---------------------------------------------------------------------------
+# EventKit helpers
+# ---------------------------------------------------------------------------
+
+
+def macos_major() -> int:
+    try:
+        return int(platform.mac_ver()[0].split(".")[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def request_access(store: EKEventStore) -> bool:
+    """Request Calendar access, pumping the runloop until the completion handler fires."""
+    state = {"done": False, "granted": False, "error": None}
+
+    def handler(granted, error):
+        state["granted"] = bool(granted)
+        state["error"] = error
+        state["done"] = True
+
+    if macos_major() >= 14 and hasattr(store, "requestFullAccessToEventsWithCompletion_"):
+        store.requestFullAccessToEventsWithCompletion_(handler)
+    else:
+        store.requestAccessToEntityType_completion_(EKEntityTypeEvent, handler)
+
+    deadline = 600  # ~60s
+    while not state["done"] and deadline > 0:
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+        deadline -= 1
+    if not state["granted"]:
+        sys.stderr.write(
+            "Calendar access denied. Grant it in System Settings > "
+            "Privacy & Security > Calendars, then re-run.\n")
+    return state["granted"]
+
+
+def resolve_calendars(store: EKEventStore, cfg: Config):
+    """Resolve config entries to actual EKCalendar objects. Warn on unmatched entries."""
+    all_cals = list(store.calendarsForEntityType_(EKEntityTypeEvent))
+    resolved = []
+    available_titles = [str(c.title()) for c in all_cals]
+    for entry in cfg.calendars:
+        matches = [c for c in all_cals if entry.matches(c)]
+        if not matches:
+            # Promote the warning to stdout too — stderr-only is too easy to
+            # miss in launchd setups where stderr goes to a separate log file.
+            msg = (f"WARNING: config entry {entry!r} matched 0 calendars. "
+                   f"Available calendar titles on this Mac: {available_titles}")
+            print(msg, flush=True)
+            sys.stderr.write(msg + "\n")
+            continue
+        for c in matches:
+            resolved.append(c)
+    if not resolved:
+        raise SystemExit("No calendars resolved from config — nothing to watch.")
+    return resolved
+
+
+def upcoming_events(store: EKEventStore, calendars, lookahead_seconds: int):
+    """Return EKEvents starting within the next `lookahead_seconds`."""
+    now = NSDate.date()
+    end = NSDate.dateWithTimeIntervalSinceNow_(lookahead_seconds)
+    predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
+        now, end, calendars)
+    return list(store.eventsMatchingPredicate_(predicate))
+
+
+# ---------------------------------------------------------------------------
+# Alert filtering + dispatch
+# ---------------------------------------------------------------------------
+
+
+# Known meeting-service URL patterns, in priority order. The extractor checks
+# these first so that — for example — a Google Meet link in event.location wins
+# over an unrelated tracking URL pasted into event.notes. Add more here as
+# needed; ordering within the list is "first match wins."
+PREFERRED_MEETING_PATTERNS = [
+    # Google Meet: https://meet.google.com/abc-defg-hij
+    re.compile(r"https?://meet\.google\.com/[a-z0-9?=&-]+", re.IGNORECASE),
+    # Zoom: https://zoom.us/j/1234567890 or https://us02web.zoom.us/j/...?pwd=...
+    re.compile(r"https?://[a-z0-9.-]*zoom\.us/j/\d+(?:\?[^\s<>\"'\)]*)?", re.IGNORECASE),
+    # Zoom personal meeting room: https://us02web.zoom.us/my/yourname
+    re.compile(r"https?://[a-z0-9.-]*zoom\.us/my/[\w/.-]+(?:\?[^\s<>\"'\)]*)?", re.IGNORECASE),
+    # Microsoft Teams: https://teams.microsoft.com/l/meetup-join/...
+    re.compile(r"https?://teams\.microsoft\.com/l/meetup-join/[^\s<>\"'\)]+", re.IGNORECASE),
+    # Webex: https://company.webex.com/meet/user or .../wbxmjs/...
+    re.compile(r"https?://[a-z0-9.-]*webex\.com/(?:meet|wbxmjs|join|j\.php)[^\s<>\"'\)]+", re.IGNORECASE),
+    # GoToMeeting
+    re.compile(r"https?://[a-z0-9.-]*gotomeeting\.com/join/\d+", re.IGNORECASE),
+    # BlueJeans
+    re.compile(r"https?://[a-z0-9.-]*bluejeans\.com/\d+(?:[?/][^\s<>\"'\)]*)?", re.IGNORECASE),
+    # Whereby
+    re.compile(r"https?://whereby\.com/[\w-]+", re.IGNORECASE),
+    # Jitsi
+    re.compile(r"https?://meet\.jit\.si/[^\s<>\"'\)]+", re.IGNORECASE),
+]
+
+# Fallback for "any URL" — used only when no known-provider pattern matched.
+_URL_RE_GENERIC = re.compile(r"https?://[^\s<>\"'\)]+")
+
+
+def should_skip(event, cfg: Config) -> bool:
+    if cfg.skip_all_day and event.isAllDay():
+        return True
+    title = str(event.title() or "")
+    lo = title.lower()
+    for needle in cfg.skip_title_substrings:
+        if needle.lower() in lo:
+            return True
+    if cfg.skip_unaccepted_meetings and _user_response_not_accepted(event):
+        return True
+    return False
+
+
+# EKParticipantStatus values we care about.
+# 0=Unknown 1=Pending 2=Accepted 3=Declined 4=Tentative
+# 5=Delegated 6=Completed 7=InProcess
+_EK_STATUS_ACCEPTED = 2
+
+
+def _user_response_not_accepted(event) -> bool:
+    """True iff the user IS an attendee on this event and their response
+    is anything other than Accepted (Tentative, Pending, Declined, etc.).
+
+    Returns False (don't skip) when:
+      - The event has no attendees array (self-created, calendar-feed item)
+      - The current user isn't in the attendees list
+      - The user's status is Accepted
+    """
+    attendees = event.attendees()
+    if not attendees:
+        return False
+    for participant in attendees:
+        is_me = False
+        try:
+            is_me = bool(participant.isCurrentUser())
+        except AttributeError:
+            pass
+        if is_me:
+            try:
+                status = int(participant.participantStatus())
+            except (AttributeError, TypeError):
+                return False
+            return status != _EK_STATUS_ACCEPTED
+    return False
+
+
+def extract_join_link(event) -> str | None:
+    """Pull the best candidate "join meeting" URL out of an event.
+
+    Strategy:
+      1. Concatenate all text-bearing fields (notes/location/URL).
+      2. Try each PREFERRED_MEETING_PATTERNS in order — a Google Meet link
+         beats an unrelated tracking URL, a Zoom link beats a calendar
+         invitation URL, etc.
+      3. Fall back to the first http(s) URL we find anywhere if no preferred
+         pattern matched.
+    """
+    parts = []
+    for field_name in ("notes", "location", "URL"):
+        getter = getattr(event, field_name, None)
+        if not getter:
+            continue
+        val = getter()
+        if not val:
+            continue
+        if hasattr(val, "absoluteString"):
+            val = val.absoluteString()
+        parts.append(str(val))
+    text = "\n".join(parts)
+
+    for pattern in PREFERRED_MEETING_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return _trim_url(m.group(0))
+
+    m = _URL_RE_GENERIC.search(text)
+    return _trim_url(m.group(0)) if m else None
+
+
+def _trim_url(url: str) -> str:
+    """Strip trailing punctuation that the URL regex commonly over-captures."""
+    while url and url[-1] in ".,;:!?>)]}'\"":
+        url = url[:-1]
+    return url
+
+
+def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
+    """Marshal event fields into an AlertInfo for the overlay."""
+    start_utc = datetime.fromtimestamp(
+        event.startDate().timeIntervalSince1970(), tz=timezone.utc)
+    start_local = start_utc.astimezone()
+    minutes_until = max(0, int((start_utc - now_utc).total_seconds() // 60))
+    location = None
+    if cfg.show_location:
+        loc = event.location()
+        if loc:
+            location = str(loc)
+    join = None
+    if cfg.show_join_link:
+        join = extract_join_link(event)
+    return AlertInfo(
+        title=str(event.title() or "(no title)"),
+        start_str=start_local.strftime("%-I:%M %p"),
+        minutes_until=minutes_until,
+        location=location,
+        join_link=join,
+    )
+
+
+_EXIT_CODE_TO_RESULT = {
+    0: "dismiss",
+    1: "snooze",
+    2: "link",
+    3: "timeout",
+}
+
+
+def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
+    """Spawn the alert subprocess. Returns the action: 'dismiss' | 'snooze' | 'link' | 'timeout'.
+
+    The alert subprocess (`alert_runner.py`) handles the entire NSWindow
+    lifecycle in its own process and exits with a code that maps back to the
+    result string. Running the modal session in a separate process eliminates
+    a class of "window stayed up after click" bugs we hit when the modal ran
+    inline inside the long-running poller daemon — process termination
+    guarantees the window is gone.
+    """
+    import sys
+    info = _build_alert_info(event, cfg, now_utc)
+    print(f"[poller] fire_alert: launching alert subprocess for {info.title!r}",
+          flush=True, file=sys.stderr)
+
+    if not cfg.use_overlay:
+        # Headless print fallback (also useful for tests / launchd debugging).
+        lines = [
+            "=" * 56,
+            "  ALERT:",
+            "  " + info.title,
+            f"  starts in {info.minutes_until} min ({info.start_str})",
+        ]
+        if info.location:
+            lines.append("  location: " + info.location)
+        if info.join_link:
+            lines.append("  join: " + info.join_link)
+        lines.append("=" * 56)
+        print("\n".join(lines), flush=True)
+        return "dismiss"
+
+    # Build the subprocess command. Two modes:
+    #   - source install: spawn `python3 alert_runner.py --title ...`
+    #   - py2app .app bundle ("frozen"): re-invoke our own binary as
+    #     `MeetingNotifier alert --title ...`. The bundle's main.py dispatcher
+    #     routes that subcommand to alert_runner.main().
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "alert"]
+    else:
+        here = Path(__file__).resolve().parent
+        cmd = [sys.executable, str(here / "alert_runner.py")]
+    cmd += [
+        "--title", info.title,
+        "--start-str", info.start_str,
+        "--minutes-until", str(info.minutes_until),
+        "--snooze-minutes", str(cfg.snooze_minutes),
+        "--timeout-seconds", str(cfg.alert_timeout_seconds),
+        "--display-mode", cfg.display_mode,
+    ]
+    if not cfg.all_spaces:
+        cmd.append("--no-all-spaces")
+    if info.location:
+        cmd.extend(["--location", info.location])
+    if info.join_link:
+        cmd.extend(["--join-link", info.join_link])
+
+    try:
+        # Inherit stdout/stderr so the alert subprocess's diagnostic prints
+        # land in our LaunchAgent log files alongside the poller's.
+        proc = subprocess.run(cmd)
+    except Exception as exc:
+        print(f"[poller] fire_alert: subprocess failed: {exc!r}",
+              flush=True, file=sys.stderr)
+        return "dismiss"
+
+    result = _EXIT_CODE_TO_RESULT.get(proc.returncode, "dismiss")
+    print(f"[poller] fire_alert: subprocess exited code={proc.returncode}, "
+          f"result={result!r}", flush=True, file=sys.stderr)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Poll loop
+# ---------------------------------------------------------------------------
+
+
+def run_once(store, calendars, cfg: Config, fired: dict,
+             snoozed_until: dict, now_utc: datetime) -> int:
+    """One poll cycle. Returns the number of alerts fired this cycle.
+
+    Two fire paths:
+      1. Snoozed re-fire: if `snoozed_until[id]` has elapsed, fire regardless
+         of whether the meeting has started. (User explicitly asked to be
+         reminded — honor that even if the meeting is now in progress.)
+      2. Initial fire: not snoozed; standard "now is within lead_time minutes
+         before start" check.
+    """
+    events = upcoming_events(store, calendars, cfg.lookahead_seconds)
+    fire_threshold = now_utc + timedelta(minutes=cfg.lead_time_minutes)
+    n_fired = 0
+    for event in events:
+        if should_skip(event, cfg):
+            continue
+        ident = str(event.eventIdentifier())
+        if ident in fired:
+            continue
+
+        snooze_time = snoozed_until.get(ident)
+        if snooze_time is not None:
+            # Snoozed: re-fire the moment the snooze elapses; don't filter on
+            # lead-time anymore. If the meeting is already in progress, that's
+            # fine — the user asked to be reminded.
+            if now_utc < snooze_time:
+                continue
+        else:
+            # No snooze pending. Two fire conditions on the initial-fire path:
+            #  (a) Standard pre-meeting alert window: now <= start <= now+lead
+            #  (b) In-progress catch-up (only if user opted in): start already
+            #      past, end still future, and we've never fired for this event
+            #      before (the `fired in ident` check above already enforces
+            #      "first time we see it").
+            start_utc = datetime.fromtimestamp(
+                event.startDate().timeIntervalSince1970(), tz=timezone.utc)
+            in_window = now_utc <= start_utc <= fire_threshold
+            in_progress = False
+            if (not in_window
+                    and cfg.notify_in_progress_meetings
+                    and now_utc > start_utc):
+                end_utc = datetime.fromtimestamp(
+                    event.endDate().timeIntervalSince1970(), tz=timezone.utc)
+                in_progress = now_utc <= end_utc
+            if not (in_window or in_progress):
+                continue
+
+        import sys
+        result = fire_alert(event, cfg, now_utc)
+        print(f"[poller] run_once: fire_alert returned {result!r}, updating state",
+              flush=True, file=sys.stderr)
+        if result == "snooze":
+            snoozed_until[ident] = now_utc + timedelta(minutes=cfg.snooze_minutes)
+            # Do NOT add to fired — we want to fire again after the snooze
+        else:
+            fired[ident] = datetime.fromtimestamp(
+                event.startDate().timeIntervalSince1970(), tz=timezone.utc)
+            snoozed_until.pop(ident, None)
+        n_fired += 1
+        print(f"[poller] run_once: state updated, n_fired={n_fired}",
+              flush=True, file=sys.stderr)
+    return n_fired
+
+
+def prune_fired(fired: dict, now_utc: datetime, retention_seconds: int = 3600) -> None:
+    """Remove entries whose start time was more than `retention_seconds` ago."""
+    cutoff = now_utc - timedelta(seconds=retention_seconds)
+    stale = [k for k, ts in fired.items() if ts < cutoff]
+    for k in stale:
+        del fired[k]
+
+
+def _find_example_config() -> Path | None:
+    """Locate config.example.toml in either the py2app bundle or the source tree."""
+    candidates = []
+    # py2app bundle: <App>.app/Contents/Resources/config.example.toml. The frozen
+    # executable lives in Contents/MacOS/, so two parents up + Resources is right.
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent.parent / "Resources" / "config.example.toml")
+    # Source layout: alongside poller.py
+    candidates.append(Path(__file__).resolve().parent / "config.example.toml")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def init_config() -> int:
+    """Scaffold ~/.config/meeting-notifier/config.toml from the bundled example.
+
+    Returns a process exit code (0 = success).
+    """
+    target = Path.home() / ".config" / "meeting-notifier" / "config.toml"
+    if target.exists():
+        print(f"Config already exists at {target}", file=sys.stderr)
+        print("Open it in your editor to change calendars or other options.",
+              file=sys.stderr)
+        return 0
+    src = _find_example_config()
+    if src is None:
+        print("ERROR: config.example.toml not found in bundle or source tree.",
+              file=sys.stderr)
+        return 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(src.read_text())
+    print(f"Wrote {target}")
+    print()
+    print("Next steps:")
+    print("  1. Run `--list` to see your available calendars.")
+    print(f"  2. Edit {target} — the [[calendars]] entries decide which")
+    print("     calendars are watched. The file is fully commented; every option")
+    print("     has an explanation right above it.")
+    print("  3. Install the LaunchAgent so the poller runs in the background.")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Path to config file (default: search ./config.toml then ~/.config/meeting-notifier/)")
+    parser.add_argument("--once", action="store_true",
+                        help="Run one poll cycle and exit")
+    parser.add_argument("--list", action="store_true",
+                        help="List discovered calendars and exit")
+    parser.add_argument("--init-config", action="store_true",
+                        help="Write a starter config.toml to ~/.config/meeting-notifier/ and exit")
+    args = parser.parse_args()
+
+    # --init-config doesn't need calendar access; handle it first.
+    if args.init_config:
+        sys.exit(init_config())
+
+    store = EKEventStore.alloc().init()
+    if not request_access(store):
+        sys.exit(1)
+
+    if args.list:
+        for c in store.calendarsForEntityType_(EKEntityTypeEvent):
+            src = c.source()
+            print(f"title={str(c.title())!r}  source={str(src.title()) if src else None!r}  "
+                  f"identifier={str(c.calendarIdentifier())}")
+        return
+
+    cfg_path = find_config(args.config)
+    cfg = load_config(cfg_path)
+    print(f"Loaded config from {cfg_path}", flush=True)
+
+    calendars = resolve_calendars(store, cfg)
+    print(f"Watching {len(calendars)} calendar(s): "
+          + ", ".join(repr(str(c.title())) for c in calendars), flush=True)
+
+    fired: dict[str, datetime] = {}
+    snoozed_until: dict[str, datetime] = {}
+    last_prune = time.time()
+
+    while True:
+        now_utc = datetime.now(timezone.utc)
+        n = run_once(store, calendars, cfg, fired, snoozed_until, now_utc)
+        if time.time() - last_prune > 3600:
+            prune_fired(fired, now_utc)
+            last_prune = time.time()
+        if args.once:
+            print(f"--once: {n} alert(s) fired this cycle.", flush=True)
+            return
+        time.sleep(cfg.poll_interval_seconds)
+
+
+if __name__ == "__main__":
+    main()
