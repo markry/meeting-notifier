@@ -14,21 +14,21 @@ A small macOS background agent that pops a **large, screen-centered alert** befo
 
 ## Install — GUI (recommended)
 
-1. Download `MeetingNotifier.app.zip` from the [latest release](../../releases) and unzip it.
+1. Download the latest `MeetingNotifier-*.zip` from the [Releases page](../../releases) and unzip it.
 2. Drag `MeetingNotifier.app` into `/Applications`.
 3. Double-click it. macOS will ask for Calendar access — click **Allow**.
 4. The settings window appears: tick the calendars you want watched, adjust any timing / display options, and click **Save & Start**.
 
-The window quits and the background notifier is now installed as a LaunchAgent, alerting you before every meeting. To change settings later, double-click the app again.
+A brief "Installation successful" dialog confirms the LaunchAgent is running. The window quits and the background notifier is now alerting you before every meeting. To change settings later, double-click the app again.
 
-### Gatekeeper note (first launch)
+The release is signed with a Developer ID *and* notarized, so first launch goes through the standard macOS quarantine prompt (one click to confirm) — no right-click trick needed.
 
-The current release is signed with a Developer ID but **not yet notarized**. On first launch macOS may show a Gatekeeper warning. Right-click the `.app` in Finder, choose **Open**, then click **Open** in the resulting dialog. After that, double-click works normally.
+See [INSTALLATION.md](INSTALLATION.md) for the CLI-driven install path and the "why not mix" warnings.
 
 ## Install — source (developers)
 
 ```bash
-git clone https://github.com/<you>/meeting-notifier.git
+git clone https://github.com/markry/meeting-notifier.git
 cd meeting-notifier
 
 # Create the venv outside the project so py2app doesn't try to bundle it.
