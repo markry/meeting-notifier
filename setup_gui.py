@@ -472,16 +472,16 @@ class SettingsWindow(NSObject):
         y = self._add_section_header(content, y, "Timing")
         y = self._add_int_field(content, y, "lead_time_minutes",
                                 "Lead time (minutes before meeting)",
-                                "How many minutes before the meeting starts to fire the alert.")
+                                "Minutes before the meeting to alert.")
         y = self._add_int_field(content, y, "poll_interval_seconds",
                                 "Polling interval (seconds)",
-                                "How often the calendar is checked. Lower = the alert fires closer to your exact lead time. Default 20.")
+                                "Lower = alerts fire nearer the lead time.")
         y = self._add_int_field(content, y, "snooze_minutes",
                                 "Snooze button duration (minutes)",
-                                "How long Snooze defers the alert before re-firing.")
+                                "Minutes Snooze defers the alert.")
         y = self._add_int_field(content, y, "alert_timeout_seconds",
                                 "Auto-dismiss after (seconds, 0 = never)",
-                                "Alert auto-closes after this many seconds of no interaction. 0 means it stays up indefinitely.")
+                                "0 = stays up until you click it.")
 
         # Display section
         y = self._add_section_header(content, y, "Display")
