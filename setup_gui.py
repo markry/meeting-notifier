@@ -79,6 +79,7 @@ DEFAULTS = {
     "all_spaces": True,
     "show_location": True,
     "show_join_link": True,
+    "join_link_known_providers_only": True,
     "skip_all_day": True,
     "skip_unaccepted_meetings": False,
     "notify_in_progress_meetings": False,
@@ -142,6 +143,7 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
         f"all_spaces = {'true' if settings['all_spaces'] else 'false'}",
         f"show_location = {'true' if settings['show_location'] else 'false'}",
         f"show_join_link = {'true' if settings['show_join_link'] else 'false'}",
+        f"join_link_known_providers_only = {'true' if settings['join_link_known_providers_only'] else 'false'}",
         f"skip_all_day = {'true' if settings['skip_all_day'] else 'false'}",
         f"skip_unaccepted_meetings = {'true' if settings['skip_unaccepted_meetings'] else 'false'}",
         f"notify_in_progress_meetings = {'true' if settings['notify_in_progress_meetings'] else 'false'}",
@@ -497,6 +499,8 @@ class SettingsWindow(NSObject):
                              "Skip tentative / pending invitations (alert only for accepted meetings)")
         y = self._add_switch(content, y, "notify_in_progress_meetings",
                              "Also alert for meetings already in progress when first discovered")
+        y = self._add_switch(content, y, "join_link_known_providers_only",
+                             "Only show join links from recognized providers (Zoom, Meet, Teams, …)")
 
         # Save / Quit buttons at the bottom
         btn_w = 120

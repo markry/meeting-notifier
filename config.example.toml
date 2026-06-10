@@ -120,3 +120,14 @@ show_location = true
 # Whether to extract the first URL from the event body/location as a "join link"
 # (Zoom, Meet, Teams, etc.) and show it.
 show_join_link = true
+
+# When true (default), only URLs matching a known meeting provider
+# (Zoom, Google Meet, Teams, Webex, GoToMeeting, BlueJeans, Whereby, Jitsi)
+# become the clickable "Join" button. When false, the first arbitrary http(s)
+# URL found in the event body/location is used as a fallback.
+#
+# Keep this true unless you rely on an in-house/custom video system whose URL
+# isn't recognized. The generic fallback is a phishing vector: anyone who can
+# put an event on a watched calendar could surface a "Join (evil.example)"
+# button in a trusted, one-click context.
+join_link_known_providers_only = true

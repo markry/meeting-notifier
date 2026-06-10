@@ -7,15 +7,21 @@
     allow-unsigned-executable-memory   — py2app's embedded interpreter writes
                                           bytecode to memory pages that are
                                           executed without re-signing
-    disable-library-validation         — lets the bundle load the bundled
-                                          Python framework, PyObjC, etc. even
-                                          though they aren't signed by Apple
+
+  NOTE: com.apple.security.cs.disable-library-validation was REMOVED (L3).
+  build.sh signs every nested .so/.dylib and the embedded Python framework
+  with the same Developer ID as the outer bundle, which is exactly what
+  library validation permits (same-team + Apple) — so the entitlement was
+  unnecessary, and dropping it stops same-user malware from loading an
+  unsigned/foreign .dylib into this Calendar-TCC-privileged process.
+  If a future build fails to launch with a "code signature ... library
+  validation" / "not valid for use in process" error in Console, it means
+  some bundled lib is NOT covered by build.sh's signing sweep — fix the
+  signing step rather than re-adding this entitlement.
 -->
 <plist version="1.0">
 <dict>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
     <!--
       Calendar data-class entitlement. Traditionally a sandboxed-app thing,

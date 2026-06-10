@@ -107,6 +107,15 @@ class Config:
     skip_all_day: bool = True
     show_location: bool = True
     show_join_link: bool = True
+    # When True (default), only URLs matching a known meeting-provider pattern
+    # (Zoom/Meet/Teams/Webex/...) become the clickable "Join" button. When
+    # False, the first arbitrary http(s) URL found anywhere in the event's
+    # notes/location is used as a fallback. The fallback is convenient for
+    # in-house video systems but is a phishing vector: anyone who can land an
+    # invite on a watched calendar could surface `Join (evil.example)` in a
+    # trusted, reflex-click context. Leave True unless you rely on a custom
+    # provider. (L2)
+    join_link_known_providers_only: bool = True
 
 
 def _safe_write_text(path: Path, content: str, mode: int = 0o600) -> None:
@@ -167,6 +176,8 @@ def load_config(path: Path) -> Config:
         skip_all_day=bool(data.get("skip_all_day", True)),
         show_location=bool(data.get("show_location", True)),
         show_join_link=bool(data.get("show_join_link", True)),
+        join_link_known_providers_only=bool(
+            data.get("join_link_known_providers_only", True)),
     )
     for entry in data.get("calendars", []):
         cfg.calendars.append(CalendarMatch(
@@ -352,7 +363,7 @@ def _user_response_not_accepted(event) -> bool:
     return False
 
 
-def extract_join_link(event) -> str | None:
+def extract_join_link(event, known_only: bool = True) -> str | None:
     """Pull the best candidate "join meeting" URL out of an event.
 
     Strategy:
@@ -360,8 +371,11 @@ def extract_join_link(event) -> str | None:
       2. Try each PREFERRED_MEETING_PATTERNS in order — a Google Meet link
          beats an unrelated tracking URL, a Zoom link beats a calendar
          invitation URL, etc.
-      3. Fall back to the first http(s) URL we find anywhere if no preferred
-         pattern matched.
+      3. If `known_only` is False, fall back to the first http(s) URL found
+         anywhere when no preferred pattern matched. When True (the default),
+         no generic fallback is used — an unrecognized URL is NOT turned into
+         a clickable Join button (anti-phishing; see Config.
+         join_link_known_providers_only).
     """
     parts = []
     for field_name in ("notes", "location", "URL"):
@@ -381,6 +395,8 @@ def extract_join_link(event) -> str | None:
         if m:
             return _trim_url(m.group(0))
 
+    if known_only:
+        return None
     m = _URL_RE_GENERIC.search(text)
     return _trim_url(m.group(0)) if m else None
 
@@ -428,7 +444,7 @@ def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
             location = str(loc)
     join = None
     if cfg.show_join_link:
-        join = extract_join_link(event)
+        join = extract_join_link(event, known_only=cfg.join_link_known_providers_only)
     return AlertInfo(
         title=str(event.title() or "(no title)"),
         start_str=start_local.strftime("%-I:%M %p"),
@@ -465,8 +481,11 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
     """
     import sys
     info = _build_alert_info(event, cfg, now_utc)
-    print(f"[poller] fire_alert: launching alert subprocess for {info.title!r}",
-          flush=True, file=sys.stderr)
+    # Log an opaque event identifier, never the meeting title — titles are PII
+    # and launchd appends these logs forever (L4). The identifier is enough to
+    # correlate a fire with a calendar event during debugging.
+    print(f"[poller] fire_alert: launching alert subprocess for event "
+          f"{str(event.eventIdentifier())}", flush=True, file=sys.stderr)
 
     if not cfg.use_overlay:
         # Headless print fallback (also useful for tests / launchd debugging).
@@ -495,30 +514,41 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
     #     siblings of sys.executable.
     if getattr(sys, "frozen", False):
         launcher = Path(sys.executable).resolve().parent / "MeetingNotifier"
-        cmd = [str(launcher), "alert"]
+        cmd = [str(launcher), "alert", "--json-stdin"]
     else:
         here = Path(__file__).resolve().parent
-        cmd = [sys.executable, str(here / "alert_runner.py")]
-    cmd += [
-        "--title", info.title,
-        "--start-str", info.start_str,
-        "--minutes-until", str(info.minutes_until),
-        "--start-utc-iso", info.start_utc.isoformat(),
-        "--snooze-minutes", str(cfg.snooze_minutes),
-        "--timeout-seconds", str(cfg.alert_timeout_seconds),
-        "--display-mode", cfg.display_mode,
-    ]
-    if not cfg.all_spaces:
-        cmd.append("--no-all-spaces")
-    if info.location:
-        cmd.extend(["--location", info.location])
-    if info.join_link:
-        cmd.extend(["--join-link", info.join_link])
+        cmd = [sys.executable, str(here / "alert_runner.py"), "--json-stdin"]
+
+    # Pass all alert parameters as a JSON document on the subprocess's stdin
+    # rather than as argv. Two reasons:
+    #   1. Meeting fields (title, location, join link incl. Zoom ?pwd= tokens)
+    #      are calendar-controlled PII. argv is world-readable via `ps` for the
+    #      life of the alert; stdin is not. (L1)
+    #   2. A crafted title like "--once" or "-Standup" (leading dash, no space)
+    #      would be mis-parsed by argparse as an option, crashing the alert
+    #      subprocess every poll cycle and silently suppressing the alert — a
+    #      DoS triggerable by anyone who can send a calendar invite. JSON values
+    #      have no such ambiguity. (M1)
+    payload = {
+        "title": info.title,
+        "start_str": info.start_str,
+        "minutes_until": info.minutes_until,
+        "start_utc_iso": info.start_utc.isoformat(),
+        "snooze_minutes": cfg.snooze_minutes,
+        "timeout_seconds": cfg.alert_timeout_seconds,
+        "display_mode": cfg.display_mode,
+        "all_spaces": cfg.all_spaces,
+        "location": info.location,
+        "join_link": info.join_link,
+    }
 
     try:
         # Inherit stdout/stderr so the alert subprocess's diagnostic prints
-        # land in our LaunchAgent log files alongside the poller's.
-        proc = subprocess.run(cmd)
+        # land in our LaunchAgent log files alongside the poller's. stdin is
+        # fed the JSON payload (subprocess.run sets stdin=PIPE when input= is
+        # given; stdout/stderr stay inherited).
+        import json
+        proc = subprocess.run(cmd, input=json.dumps(payload), text=True)
     except Exception as exc:
         print(f"[poller] fire_alert: subprocess failed: {exc!r}",
               flush=True, file=sys.stderr)

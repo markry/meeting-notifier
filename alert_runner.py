@@ -15,17 +15,20 @@ The window can't possibly persist past process termination — which fixes a
 class of "the modal window stayed up after I clicked" bugs we hit with the
 inline approach.
 
-Exit codes (interpreted by the poller):
-  0 = dismiss
-  1 = snooze
-  2 = link (user clicked the join link)
-  3 = timeout (auto-dismissed)
-  >127 = killed by signal — treated as dismiss
+Exit codes (interpreted by the poller via poller._EXIT_CODE_TO_RESULT; in the
+100+ range so a pre-return crash using a low code isn't mistaken for a user
+action):
+  100 = dismiss
+  101 = snooze
+  102 = link (user clicked the join link)
+  103 = timeout (auto-dismissed)
+  anything else = treated by the poller as a dispatch failure (retry next poll)
 
-Usage:
-    python3 alert_runner.py --title "Standup" --start-str "9:30 AM" \\
-        --minutes-until 5 [--location "Room 4B"] [--join-link https://...] \\
-        [--snooze-minutes 2] [--timeout-seconds 0]
+Invocation:
+    Primary (used by the poller): `alert_runner.py --json-stdin` with the alert
+    parameters as a JSON document on stdin. Legacy `--title ... --start-str ...`
+    argv flags remain for manual CLI testing only — never feed calendar data
+    through them (a value starting with '-' is ambiguous to argparse).
 """
 from __future__ import annotations
 
@@ -48,7 +51,53 @@ EXIT_CODES = {
 }
 
 
+_VALID_DISPLAY_MODES = {"all", "main", "focused"}
+
+
+def _parse_iso(value):
+    if not value:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _run_from_stdin_json() -> int:
+    """Primary invocation path (poller.fire_alert). All alert parameters arrive
+    as a JSON document on stdin instead of argv, so calendar-controlled PII
+    never lands in the process's argument list (visible via `ps`) and a crafted
+    meeting title can't be mis-parsed as a CLI option. See poller.fire_alert."""
+    import json
+    raw = sys.stdin.read()
+    data = json.loads(raw)
+    display_mode = data.get("display_mode", "all")
+    if display_mode not in _VALID_DISPLAY_MODES:
+        display_mode = "all"
+    info = AlertInfo(
+        title=str(data.get("title", "(no title)")),
+        start_str=str(data.get("start_str", "")),
+        minutes_until=int(data.get("minutes_until", 0)),
+        location=data.get("location"),
+        join_link=data.get("join_link"),
+        start_utc=_parse_iso(data.get("start_utc_iso")),
+    )
+    result = show_alert(info,
+                        snooze_minutes=int(data.get("snooze_minutes", 2)),
+                        timeout_seconds=int(data.get("timeout_seconds", 0)),
+                        display_mode=display_mode,
+                        all_spaces=bool(data.get("all_spaces", True)))
+    return EXIT_CODES.get(result, EXIT_CODES["dismiss"])
+
+
 def main() -> int:
+    if "--json-stdin" in sys.argv[1:]:
+        return _run_from_stdin_json()
+
+    # Legacy argv path — kept for manual CLI testing only. The poller no longer
+    # uses this (it passes --json-stdin). Do not feed it untrusted/calendar data
+    # via argv: a value starting with '-' is ambiguous to argparse.
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--title", required=True)
