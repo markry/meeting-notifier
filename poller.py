@@ -109,15 +109,55 @@ class Config:
     show_join_link: bool = True
 
 
+def _safe_write_text(path: Path, content: str, mode: int = 0o600) -> None:
+    """Write text to `path` atomically, refusing if the existing path is a
+    symlink. Defends against a TOCTOU class of attack where another local
+    process plants a symlink in a writable parent directory between our
+    existence check and our open, redirecting our write somewhere we don't
+    intend. Also writes via tempfile+rename so a crash mid-write can't leave
+    a half-written file."""
+    import os, tempfile
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # lstat raises FileNotFoundError if absent — that's fine, we'll create it.
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and (st.st_mode & 0o170000) == 0o120000:  # S_IFLNK
+        raise OSError(
+            f"refusing to write through symlink at {path}; "
+            "remove the symlink and re-run if this was intentional")
+    fd, tmp_path = tempfile.mkstemp(dir=str(parent), prefix=".tmp-", suffix=path.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _clamp(value: int, lo: int, default: int) -> int:
+    """Clamp an integer config value to at least `lo`; substitute default if
+    the value is below lo (preventing a `time.sleep(0)` daemon spin from a
+    typo or malicious config edit)."""
+    return max(lo, value) if value >= lo else default
+
+
 def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
     cfg = Config(
-        lead_time_minutes=int(data.get("lead_time_minutes", 5)),
-        poll_interval_seconds=int(data.get("poll_interval_seconds", 60)),
-        lookahead_seconds=int(data.get("lookahead_seconds", 900)),
-        snooze_minutes=int(data.get("snooze_minutes", 2)),
-        alert_timeout_seconds=int(data.get("alert_timeout_seconds", 0)),
+        lead_time_minutes=max(0, int(data.get("lead_time_minutes", 5))),
+        poll_interval_seconds=_clamp(int(data.get("poll_interval_seconds", 60)), 5, 60),
+        lookahead_seconds=_clamp(int(data.get("lookahead_seconds", 900)), 60, 900),
+        snooze_minutes=max(1, int(data.get("snooze_minutes", 2))),
+        alert_timeout_seconds=max(0, int(data.get("alert_timeout_seconds", 0))),
         display_mode=str(data.get("display_mode", "all")),
         all_spaces=bool(data.get("all_spaces", True)),
         notify_in_progress_meetings=bool(data.get("notify_in_progress_meetings", False)),
@@ -345,8 +385,28 @@ def extract_join_link(event) -> str | None:
     return _trim_url(m.group(0)) if m else None
 
 
+# Characters that can visually disguise the true target of a URL: ASCII
+# control chars (C0 + DEL) and Unicode bidi / zero-width formatting chars.
+# We strip these from URLs before storing or displaying so a malicious event
+# notes field can't include "https://goodco.com‮/evilco.com" that
+# right-to-left-overrides into the user's eye as the good domain.
+_URL_SAFE_STRIP = (
+    set(chr(c) for c in range(0x00, 0x20)) | {chr(0x7F)} |
+    {chr(c) for c in (
+        0x200B, 0x200C, 0x200D,                       # zero-width spaces / joiners
+        0x200E, 0x200F,                               # LRM/RLM
+        0x202A, 0x202B, 0x202C, 0x202D, 0x202E,       # bidi embeddings / overrides
+        0x2066, 0x2067, 0x2068, 0x2069,               # bidi isolates
+        0xFEFF,                                       # BOM / zero-width nbsp
+    )}
+)
+
+
 def _trim_url(url: str) -> str:
-    """Strip trailing punctuation that the URL regex commonly over-captures."""
+    """Strip trailing punctuation the URL regex commonly over-captures, plus
+    any bidi / zero-width / control characters that could disguise the URL's
+    true target when rendered."""
+    url = "".join(c for c in url if c not in _URL_SAFE_STRIP)
     while url and url[-1] in ".,;:!?>)]}'\"":
         url = url[:-1]
     return url
@@ -433,7 +493,7 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
     #     as a script path, which fails. The 0.2.5 bug. Find the launcher via
     #     siblings of sys.executable.
     if getattr(sys, "frozen", False):
-        launcher = Path(sys.executable).parent / "MeetingNotifier"
+        launcher = Path(sys.executable).resolve().parent / "MeetingNotifier"
         cmd = [str(launcher), "alert"]
     else:
         here = Path(__file__).resolve().parent
@@ -550,12 +610,22 @@ def run_once(store, calendars, cfg: Config, fired: dict,
     return n_fired
 
 
-def prune_fired(fired: dict, now_utc: datetime, retention_seconds: int = 3600) -> None:
-    """Remove entries whose start time was more than `retention_seconds` ago."""
+def prune_fired(fired: dict, snoozed_until: dict, now_utc: datetime,
+                retention_seconds: int = 3600) -> None:
+    """Remove old entries from the dedup dicts.
+
+    `fired`: drop entries whose start was >retention_seconds ago.
+    `snoozed_until`: drop entries whose snooze elapsed >24h ago. This handles
+    the case where a user snoozes an alert and then the event is deleted from
+    the calendar before the snooze elapses - without this prune the entry
+    sits forever, an unbounded slow memory leak on a long-running daemon.
+    """
     cutoff = now_utc - timedelta(seconds=retention_seconds)
-    stale = [k for k, ts in fired.items() if ts < cutoff]
-    for k in stale:
+    for k in [k for k, ts in fired.items() if ts < cutoff]:
         del fired[k]
+    snooze_cutoff = now_utc - timedelta(hours=24)
+    for k in [k for k, ts in snoozed_until.items() if ts < snooze_cutoff]:
+        del snoozed_until[k]
 
 
 def _find_example_config() -> Path | None:
@@ -589,8 +659,7 @@ def init_config() -> int:
         print("ERROR: config.example.toml not found in bundle or source tree.",
               file=sys.stderr)
         return 1
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(src.read_text())
+    _safe_write_text(target, src.read_text(encoding="utf-8"), mode=0o600)
     print(f"Wrote {target}")
     print()
     print("Next steps:")
@@ -647,7 +716,7 @@ def main():
         now_utc = datetime.now(timezone.utc)
         n = run_once(store, calendars, cfg, fired, snoozed_until, now_utc)
         if time.time() - last_prune > 3600:
-            prune_fired(fired, now_utc)
+            prune_fired(fired, snoozed_until, now_utc)
             last_prune = time.time()
         if args.once:
             print(f"--once: {n} alert(s) fired this cycle.", flush=True)

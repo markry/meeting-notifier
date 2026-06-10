@@ -228,12 +228,22 @@ class AlertController(NSObject):
             content.addSubview_(loc_lbl)
             cursor_y -= loc_h + 4
 
-        # Optional join link
+        # Optional join link. Display only the URL's hostname in the button
+        # label, not the full URL: the alert conditions the user to click
+        # "Join meeting" without reading, so showing the full URL gives an
+        # attacker who can land a malicious URL in event notes a one-click
+        # phishing surface. Hostname-only makes the destination scannable.
+        # The full original URL is still what gets opened on click.
         if self._info.join_link:
+            from urllib.parse import urlparse as _urlparse
+            try:
+                _host = _urlparse(self._info.join_link).hostname or self._info.join_link
+            except Exception:
+                _host = self._info.join_link
             link_h = 30
             link_rect = NSMakeRect(20, cursor_y - link_h, _WIN_W - 40, link_h)
             link_btn = NSButton.alloc().initWithFrame_(link_rect)
-            link_btn.setTitle_("🔗  " + self._info.join_link)
+            link_btn.setTitle_(f"🔗  Join ({_host})")
             link_btn.setBordered_(False)
             link_btn.setFont_(NSFont.systemFontOfSize_(15))
             link_btn.setTarget_(self)

@@ -87,6 +87,12 @@ def main():
     # Ensure target dirs exist.
     LAUNCHAGENTS_DIR.mkdir(parents=True, exist_ok=True)
     args.logdir.mkdir(parents=True, exist_ok=True)
+    # Tighten log dir to owner-only so meeting titles + Zoom URLs (which
+    # often contain ?pwd= tokens) aren't world-readable on shared Macs.
+    try:
+        os.chmod(args.logdir, 0o700)
+    except OSError:
+        pass
 
     plist_path = LAUNCHAGENTS_DIR / f"{args.label}.plist"
     stdout_log = args.logdir / "stdout.log"
@@ -124,8 +130,32 @@ def main():
         import time as _time
         _time.sleep(1)
 
-    # write the rendered plist
-    plist_path.write_text(rendered)
+    # Atomic plist write that refuses to follow a symlink. ~/Library/
+    # LaunchAgents/ is user-writable, so without this a local malware
+    # process could plant a symlink at our path and redirect the rendered
+    # plist somewhere else; the resulting launchd-loaded plist would then
+    # run code at every login.
+    import tempfile as _tempfile, stat as _stat
+    try:
+        st = os.lstat(plist_path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and _stat.S_ISLNK(st.st_mode):
+        sys.exit(f"refusing to write through symlink at {plist_path}; "
+                 "remove and re-run if this was intentional.")
+    fd, tmp = _tempfile.mkstemp(dir=str(plist_path.parent),
+                                prefix=".tmp-", suffix=".plist")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(rendered)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, plist_path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
     print(f"  wrote {plist_path}")
 
     # bootstrap (load)

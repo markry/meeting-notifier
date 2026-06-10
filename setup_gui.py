@@ -44,7 +44,7 @@ from EventKit import EKEventStore, EKEntityTypeEvent
 # macOS-version-aware logic (full-access vs. legacy entity-type call).
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from poller import request_access  # noqa: E402
+from poller import request_access, _safe_write_text  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -150,22 +150,64 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
     ]
     for cal in watched_calendars:
         lines.append("[[calendars]]")
-        lines.append(f'title = "{_escape(cal["title"])}"')
+        lines.append(f"title = {_toml_value(cal['title'])}")
         if cal.get("source"):
-            lines.append(f'source = "{_escape(cal["source"])}"')
+            lines.append(f"source = {_toml_value(cal['source'])}")
         lines.append("")
-    # encoding="utf-8" defensively in case the bundle is launched without
-    # a UTF-8 locale (some Finder/launchd launch contexts inherit ASCII).
-    CONFIG_PATH.write_text("\n".join(lines), encoding="utf-8")
+    # Atomic write + reject symlink, plus encoding="utf-8" in case the bundle
+    # was launched from a context that inherited an ASCII locale (Finder).
+    _safe_write_text(CONFIG_PATH, "\n".join(lines), mode=0o600)
 
 
 def _toml_string_list(items: list[str]) -> str:
-    inner = ", ".join(f'"{_escape(s)}"' for s in items)
+    inner = ", ".join(_toml_value(s) for s in items)
     return f"[{inner}]"
 
 
-def _escape(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+def _toml_value(s: str) -> str:
+    """Render a Python string as a TOML string value, choosing the safest
+    representation.
+
+    Calendar titles arrive from EventKit (ultimately CalDAV / Exchange / etc.)
+    so they can contain arbitrary characters including newlines, tabs, and
+    embedded quotes. The original `_escape` only escaped `\\` and `"`, which
+    silently broke the file on the next read if a calendar name had a
+    newline - and worse, a carefully crafted name with embedded TOML syntax
+    could overwrite other keys when re-parsed.
+
+    Strategy:
+      - Prefer TOML literal strings (single-quoted, no escaping) when the
+        value contains no single quotes and no control characters.
+      - Otherwise emit a TOML basic string with the seven standard escape
+        sequences plus \\uXXXX for any other C0 / DEL control character.
+    """
+    has_squote = "'" in s
+    has_ctrl = any(ord(c) < 0x20 or ord(c) == 0x7F for c in s)
+    if not has_squote and not has_ctrl:
+        return f"'{s}'"
+    out = ['"']
+    for c in s:
+        cp = ord(c)
+        if c == "\\":
+            out.append("\\\\")
+        elif c == '"':
+            out.append('\\"')
+        elif c == "\b":
+            out.append("\\b")
+        elif c == "\t":
+            out.append("\\t")
+        elif c == "\n":
+            out.append("\\n")
+        elif c == "\f":
+            out.append("\\f")
+        elif c == "\r":
+            out.append("\\r")
+        elif cp < 0x20 or cp == 0x7F:
+            out.append(f"\\u{cp:04X}")
+        else:
+            out.append(c)
+    out.append('"')
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +252,12 @@ def install_or_restart_launchagent(app_path: Path) -> None:
     """Write the plist, bootout if loaded, then bootstrap + kickstart."""
     LAUNCHAGENTS_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    # Tighten log dir to owner-only so meeting titles + Zoom links with
+    # embedded ?pwd= tokens aren't world-readable on a shared Mac.
+    try:
+        os.chmod(LOG_DIR, 0o700)
+    except OSError:
+        pass
 
     plist_path = LAUNCHAGENTS_DIR / f"{LABEL}.plist"
     domain = f"gui/{os.getuid()}"
@@ -222,7 +270,11 @@ def install_or_restart_launchagent(app_path: Path) -> None:
         subprocess.run(["launchctl", "bootout", target], capture_output=True)
         time.sleep(1)  # launchd needs a moment to release the label
 
-    plist_path.write_text(_plist_contents(app_path))
+    # Atomic write that refuses to follow a symlink at plist_path - blocks a
+    # local malware vector where another user-context process plants a symlink
+    # in ~/Library/LaunchAgents/ to redirect our plist write, then waits for
+    # the resulting launchd-loaded plist to run code at every login.
+    _safe_write_text(plist_path, _plist_contents(app_path), mode=0o600)
     subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)],
                    check=True)
     subprocess.run(["launchctl", "kickstart", "-k", target], check=False)
