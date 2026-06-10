@@ -663,9 +663,10 @@ class SettingsWindow(NSObject):
             "installFinished:", None, False)
 
     def tickStatus_(self, timer):
-        # Cycle 1 -> 2 -> 3 -> 1 dots on the install status line so the user
-        # can see the worker is still alive.
-        self._install_dots = (self._install_dots % 3) + 1
+        # Keep extending the dots so the user's eye catches the growth.
+        # Reset-cycling at 3 was too subtle. The install takes ~15s so the
+        # string stays within the label's width comfortably.
+        self._install_dots += 1
         if self._status_label:
             self._status_label.setStringValue_(
                 "Installing background agent" + ("." * self._install_dots))
