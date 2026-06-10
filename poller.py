@@ -39,8 +39,11 @@ import subprocess
 from EventKit import EKEventStore, EKEntityTypeEvent
 from Foundation import NSRunLoop, NSDate
 
-from overlay import AlertInfo  # only the data class — the alert subprocess
-                                # handles the actual NSWindow rendering
+from overlay import AlertInfo, minutes_until_display
+                                # AlertInfo: the data class passed to the alert
+                                # subprocess; minutes_until_display: shared
+                                # rounding so the first popup and the overlay's
+                                # 30s refresh agree on the minute shown.
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +74,7 @@ class CalendarMatch:
 @dataclass
 class Config:
     lead_time_minutes: int = 5
-    poll_interval_seconds: int = 60
+    poll_interval_seconds: int = 20
     lookahead_seconds: int = 900
     snooze_minutes: int = 2
     # Auto-dismiss after N seconds if the user doesn't interact. 0 = never
@@ -163,7 +166,7 @@ def load_config(path: Path) -> Config:
         data = tomllib.load(f)
     cfg = Config(
         lead_time_minutes=max(0, int(data.get("lead_time_minutes", 5))),
-        poll_interval_seconds=_clamp(int(data.get("poll_interval_seconds", 60)), 5, 60),
+        poll_interval_seconds=_clamp(int(data.get("poll_interval_seconds", 20)), 5, 20),
         lookahead_seconds=_clamp(int(data.get("lookahead_seconds", 900)), 60, 900),
         snooze_minutes=max(1, int(data.get("snooze_minutes", 2))),
         alert_timeout_seconds=max(0, int(data.get("alert_timeout_seconds", 0))),
@@ -433,10 +436,11 @@ def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
     start_utc = datetime.fromtimestamp(
         event.startDate().timeIntervalSince1970(), tz=timezone.utc)
     start_local = start_utc.astimezone()
-    # Negative means the meeting has already started (only reached when
-    # notify_in_progress_meetings=True). The overlay renders that case
-    # as "Already started" rather than "Starts in 0 minutes".
-    minutes_until = int((start_utc - now_utc).total_seconds() // 60)
+    # Rounded to nearest minute (and negative when already started); see
+    # minutes_until_display. Negative means the meeting has already started
+    # (only reached when notify_in_progress_meetings=True) and the overlay
+    # renders "Already started" rather than "Starts in 0 minutes".
+    minutes_until = minutes_until_display(start_utc, now_utc)
     location = None
     if cfg.show_location:
         loc = event.location()

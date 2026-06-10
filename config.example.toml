@@ -11,8 +11,11 @@
 # How many minutes before a meeting starts to show the alert.
 lead_time_minutes = 5
 
-# How often the poller checks for upcoming events (seconds).
-poll_interval_seconds = 60
+# How often the poller checks for upcoming events (seconds). A tighter interval
+# makes the alert fire closer to exactly lead_time_minutes before the meeting,
+# so the "Starts in N minutes" line reliably shows your configured lead. The
+# CPU cost is negligible (one calendar query per cycle).
+poll_interval_seconds = 20
 
 # How far in the future to look when querying events (seconds). Should be larger
 # than lead_time_minutes * 60 + poll_interval_seconds so events don't slip through.

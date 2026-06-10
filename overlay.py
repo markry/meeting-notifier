@@ -74,6 +74,29 @@ class AlertInfo:
     start_utc: datetime | None = None
 
 
+def minutes_until_display(start_utc: datetime, now_utc: datetime) -> int:
+    """Whole minutes from `now_utc` until `start_utc`, for the "Starts in N
+    minutes" line.
+
+    Upcoming meetings are rounded UP to the next whole minute. The poller only
+    checks for fire-eligible events once per poll cycle, so the alert typically
+    fires a little after the lead-time threshold (e.g. with a 5-minute lead the
+    meeting is ~4:4x away by the time we fire). Truncating showed "4 minutes"
+    for a lead of 5; rounding UP restores "5" no matter how late within the
+    cycle the poll caught the threshold — so it reads correctly whether the
+    poll interval is the default 20s or a legacy 60s config.
+
+    Past-start meetings (the notify_in_progress_meetings catch-up path) return
+    a negative value so the overlay renders "Already started" — the sign of the
+    real delta decides that independent of rounding, so a meeting that began a
+    few seconds ago isn't shown as "Starts in 0 minutes".
+    """
+    secs = (start_utc - now_utc).total_seconds()
+    if secs < 0:
+        return int(secs // 60)          # floor keeps already-started negative
+    return -(-int(secs) // 60)          # ceil: round up to the next whole minute
+
+
 # Window dimensions, used for layout math in multiple methods.
 _WIN_W = 720
 _WIN_H = 360
@@ -320,7 +343,7 @@ class AlertController(NSObject):
         if self._info.start_utc is None:
             return
         now_utc = datetime.now(timezone.utc)
-        minutes_until = int((self._info.start_utc - now_utc).total_seconds() // 60)
+        minutes_until = minutes_until_display(self._info.start_utc, now_utc)
         text = self._compute_when_text(minutes_until)
         for lbl in self._when_labels:
             lbl.setStringValue_(text)

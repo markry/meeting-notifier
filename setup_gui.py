@@ -60,7 +60,7 @@ LABEL = "net.ryland.meeting-notifier"
 
 # Window dimensions
 WIN_W = 720
-WIN_H = 670
+WIN_H = 705
 PAD = 20
 
 
@@ -71,7 +71,7 @@ PAD = 20
 
 DEFAULTS = {
     "lead_time_minutes": 5,
-    "poll_interval_seconds": 60,
+    "poll_interval_seconds": 20,
     "lookahead_seconds": 900,
     "snooze_minutes": 2,
     "alert_timeout_seconds": 0,
@@ -124,10 +124,9 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
         "#        launchctl kickstart -k gui/$(id -u)/net.ryland.meeting-notifier",
         "#   3. DO NOT double-click /Applications/MeetingNotifier.app afterward.",
         "#      Re-launching the .app runs the GUI, which rewrites this file",
-        "#      from the form fields and DROPS any keys the GUI doesn't know",
-        "#      about - including identifier-based [[calendars]] entries,",
-        "#      poll_interval_seconds, lookahead_seconds, use_overlay, and",
-        "#      custom skip_title_substrings values.",
+        "#      from the form fields and DROPS any keys the GUI doesn't manage -",
+        "#      notably `use_overlay` and identifier-based [[calendars]] entries",
+        "#      (the GUI re-writes calendars by title + source, not identifier).",
         "#",
         "# To recover from an accidental GUI overwrite, restore from your backup",
         "# and restart the poller as above.",
@@ -474,6 +473,9 @@ class SettingsWindow(NSObject):
         y = self._add_int_field(content, y, "lead_time_minutes",
                                 "Lead time (minutes before meeting)",
                                 "How many minutes before the meeting starts to fire the alert.")
+        y = self._add_int_field(content, y, "poll_interval_seconds",
+                                "Polling interval (seconds)",
+                                "How often the calendar is checked. Lower = the alert fires closer to your exact lead time. Default 20.")
         y = self._add_int_field(content, y, "snooze_minutes",
                                 "Snooze button duration (minutes)",
                                 "How long Snooze defers the alert before re-firing.")
