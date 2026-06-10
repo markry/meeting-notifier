@@ -663,13 +663,19 @@ class SettingsWindow(NSObject):
             "installFinished:", None, False)
 
     def tickStatus_(self, timer):
-        # Keep extending the dots so the user's eye catches the growth.
-        # Reset-cycling at 3 was too subtle. The install takes ~15s so the
-        # string stays within the label's width comfortably.
-        self._install_dots += 1
-        if self._status_label:
+        # Flash the status on/off each tick AND extend the dots on the
+        # visible-phase ticks. The growing dots show monotonic progress
+        # for the user who happens to look during a visible phase; the
+        # flash forces the eye to register motion at the periphery.
+        self._install_visible = not getattr(self, "_install_visible", False)
+        if self._status_label is None:
+            return
+        if self._install_visible:
+            self._install_dots += 1
             self._status_label.setStringValue_(
                 "Installing background agent" + ("." * self._install_dots))
+        else:
+            self._status_label.setStringValue_("")
 
     def installFinished_(self, sender):
         # Stop the dot-tick timer before showing the result alert or quitting.
