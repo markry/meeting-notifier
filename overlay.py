@@ -202,7 +202,7 @@ class AlertController(NSObject):
         # to flag this).
         when_h = 32
         if self._info.minutes_until < 0:
-            when_text = f"Already started  ·  {self._info.start_str}"
+            when_text = f"Already started at {self._info.start_str}"
         else:
             minutes_word = "minute" if self._info.minutes_until == 1 else "minutes"
             when_text = (
