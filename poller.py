@@ -171,7 +171,13 @@ def macos_major() -> int:
 
 
 def request_access(store: EKEventStore) -> bool:
-    """Request Calendar access, pumping the runloop until the completion handler fires."""
+    """Request Calendar access, pumping the runloop until the completion handler fires.
+
+    Note: The Hardened Runtime + Developer ID bundle MUST carry the
+    `com.apple.security.personal-information.calendars` entitlement on macOS
+    26 (Tahoe) and later, otherwise tccd silently rejects this request before
+    showing the system dialog. The entitlement is wired in entitlements.plist.
+    """
     state = {"done": False, "granted": False, "error": None}
 
     def handler(granted, error):
@@ -369,11 +375,17 @@ def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
     )
 
 
+# Exit codes for the alert subprocess. Chosen in the 100+ range so they don't
+# collide with common crash codes (Python uses 1 for unhandled exceptions and
+# 2 for argparse errors, etc.). If we see a non-recognized code we treat it
+# as a dispatch failure rather than silently mapping an unrelated crash code
+# to a user action (the 0.2.5 bug where exit code 2 from a broken alert-
+# subprocess invocation was mis-interpreted as "user clicked link").
 _EXIT_CODE_TO_RESULT = {
-    0: "dismiss",
-    1: "snooze",
-    2: "link",
-    3: "timeout",
+    100: "dismiss",
+    101: "snooze",
+    102: "link",
+    103: "timeout",
 }
 
 
@@ -410,11 +422,16 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
 
     # Build the subprocess command. Two modes:
     #   - source install: spawn `python3 alert_runner.py --title ...`
-    #   - py2app .app bundle ("frozen"): re-invoke our own binary as
-    #     `MeetingNotifier alert --title ...`. The bundle's main.py dispatcher
-    #     routes that subcommand to alert_runner.main().
+    #   - py2app .app bundle ("frozen"): re-invoke the bundle's LAUNCHER binary
+    #     (Contents/MacOS/MeetingNotifier) with `alert` as the first arg, so
+    #     main.py's dispatcher routes to alert_runner.main(). sys.executable
+    #     in py2app is Contents/MacOS/python (the framework binary, not the
+    #     launcher) — invoking THAT with "alert" makes Python interpret "alert"
+    #     as a script path, which fails. The 0.2.5 bug. Find the launcher via
+    #     siblings of sys.executable.
     if getattr(sys, "frozen", False):
-        cmd = [sys.executable, "alert"]
+        launcher = Path(sys.executable).parent / "MeetingNotifier"
+        cmd = [str(launcher), "alert"]
     else:
         here = Path(__file__).resolve().parent
         cmd = [sys.executable, str(here / "alert_runner.py")]
@@ -442,7 +459,15 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
               flush=True, file=sys.stderr)
         return "dismiss"
 
-    result = _EXIT_CODE_TO_RESULT.get(proc.returncode, "dismiss")
+    result = _EXIT_CODE_TO_RESULT.get(proc.returncode)
+    if result is None:
+        # Unrecognized exit code = the subprocess didn't reach our own exit
+        # path. Most likely a crash before alert_runner.main() returned.
+        # Log loudly and signal failure to the caller so it doesn't mark the
+        # event as fired (and so on next poll we'll try again).
+        print(f"[poller] fire_alert: alert subprocess crashed (returncode={proc.returncode}); "
+              f"event will NOT be marked fired", flush=True, file=sys.stderr)
+        return "failed"
     print(f"[poller] fire_alert: subprocess exited code={proc.returncode}, "
           f"result={result!r}", flush=True, file=sys.stderr)
     return result
@@ -505,6 +530,10 @@ def run_once(store, calendars, cfg: Config, fired: dict,
         result = fire_alert(event, cfg, now_utc)
         print(f"[poller] run_once: fire_alert returned {result!r}, updating state",
               flush=True, file=sys.stderr)
+        if result == "failed":
+            # Don't mark fired — next poll cycle will retry. Loud log lines
+            # in fire_alert have already explained the crash.
+            continue
         if result == "snooze":
             snoozed_until[ident] = now_utc + timedelta(minutes=cfg.snooze_minutes)
             # Do NOT add to fired — we want to fire again after the snooze
@@ -580,6 +609,8 @@ def main():
                         help="List discovered calendars and exit")
     parser.add_argument("--init-config", action="store_true",
                         help="Write a starter config.toml to ~/.config/meeting-notifier/ and exit")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Run in LaunchAgent mode (no-op flag; signals launchd-managed invocation)")
     args = parser.parse_args()
 
     # --init-config doesn't need calendar access; handle it first.

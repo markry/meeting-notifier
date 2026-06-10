@@ -114,9 +114,24 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     lines = [
-        "# Meeting Notifier configuration.",
-        "# Written by the setup GUI. You can hand-edit it, but re-running the GUI",
-        "# will overwrite your changes.",
+        "# Meeting Notifier configuration - written by the setup GUI.",
+        "#",
+        "# Editing this file by hand:",
+        "#",
+        "#   1. Make your edits.",
+        "#   2. Restart the background poller so it re-reads the file:",
+        "#        launchctl kickstart -k gui/$(id -u)/net.ryland.meeting-notifier",
+        "#   3. DO NOT double-click /Applications/MeetingNotifier.app afterward.",
+        "#      Re-launching the .app runs the GUI, which rewrites this file",
+        "#      from the form fields and DROPS any keys the GUI doesn't know",
+        "#      about - including identifier-based [[calendars]] entries,",
+        "#      poll_interval_seconds, lookahead_seconds, use_overlay, and",
+        "#      custom skip_title_substrings values.",
+        "#",
+        "# To recover from an accidental GUI overwrite, restore from your backup",
+        "# and restart the poller as above.",
+        "#",
+        "# See config.example.toml in the source repo for every documented option.",
         "",
         f"lead_time_minutes = {int(settings['lead_time_minutes'])}",
         f"poll_interval_seconds = {int(settings['poll_interval_seconds'])}",
@@ -139,7 +154,9 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
         if cal.get("source"):
             lines.append(f'source = "{_escape(cal["source"])}"')
         lines.append("")
-    CONFIG_PATH.write_text("\n".join(lines))
+    # encoding="utf-8" defensively in case the bundle is launched without
+    # a UTF-8 locale (some Finder/launchd launch contexts inherit ASCII).
+    CONFIG_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _toml_string_list(items: list[str]) -> str:
@@ -622,15 +639,33 @@ class SettingsWindow(NSObject):
             self.performSelector_withObject_afterDelay_("doQuit:", None, 0.7)
 
     def doInstall_(self, sender):
+        # Run the launchctl waterfall on a worker thread so the main runloop
+        # keeps painting / responding to clicks. Otherwise the user gets a
+        # ~15s SBOD while we shell out to launchctl print/bootout/sleep/
+        # bootstrap/kickstart in sequence.
+        import threading
+        self._install_error = None
+        threading.Thread(target=self._installWorker, daemon=True).start()
+
+    @objc.python_method
+    def _installWorker(self):
         try:
             install_or_restart_launchagent(detect_app_path())
         except Exception as exc:
+            self._install_error = exc
+        # Bounce back to the main thread to finish (modal alert + terminate
+        # both require the main runloop).
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "installFinished:", None, False)
+
+    def installFinished_(self, sender):
+        err = getattr(self, "_install_error", None)
+        if err is not None:
             self._show_modal_alert(
                 "Couldn't (re)start the background agent",
                 f"Config saved to {CONFIG_PATH}, but the LaunchAgent "
-                f"install/restart failed:\n\n{exc}\n\nYou can install it "
+                f"install/restart failed:\n\n{err}\n\nYou can install it "
                 "manually with the CLI tools described in the README.")
-            # Re-enable buttons so user can retry or cancel out.
             if self._save_button:
                 self._save_button.setEnabled_(True)
             if self._cancel_button:

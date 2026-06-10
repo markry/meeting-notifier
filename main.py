@@ -22,8 +22,10 @@ def main():
         sys.argv = [sys.argv[0]] + args[1:]
         from alert_runner import main as alert_main
         sys.exit(alert_main())
-    elif args and args[0] == "--daemon":
-        sys.argv = [sys.argv[0]] + args[1:]
+    elif args:
+        # Any other CLI args route to the poller, which owns --daemon (the
+        # LaunchAgent-invoked mode) and the operator/debug flags --list,
+        # --once, --init-config, --config. The GUI takes no args.
         from poller import main as poller_main
         poller_main()
     else:

@@ -35,11 +35,16 @@ import sys
 from overlay import AlertInfo, show_alert
 
 
+# Exit codes paired with poller._EXIT_CODE_TO_RESULT. 100+ range so they
+# don't collide with common Python crash codes (1 = unhandled exception,
+# 2 = argparse error, etc.). A crash before main() returns will use one of
+# those low codes; poller.fire_alert treats anything not in this map as a
+# dispatch failure rather than a user action.
 EXIT_CODES = {
-    "dismiss": 0,
-    "snooze":  1,
-    "link":    2,
-    "timeout": 3,
+    "dismiss": 100,
+    "snooze":  101,
+    "link":    102,
+    "timeout": 103,
 }
 
 

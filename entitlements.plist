@@ -17,5 +17,15 @@
     <true/>
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
+    <!--
+      Calendar data-class entitlement. Traditionally a sandboxed-app thing,
+      but macOS 26 (Tahoe) appears to also require it on non-sandboxed apps
+      requesting Calendar access via EventKit. Without it, tccd refuses to
+      surface the permission dialog (silent denial with promptPolicy=4 in
+      the system log; -[TCCDAccessIdentity matchesCodeRequirement:] fails
+      with -67050).
+    -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
 </dict>
 </plist>
