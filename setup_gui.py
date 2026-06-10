@@ -37,7 +37,7 @@ from AppKit import (
     NSView, NSPopUpButton,
     NSScreen, NSAlert, NSAlertStyleInformational,
 )
-from Foundation import NSObject, NSMakeRect, NSMakeSize, NSMakePoint
+from Foundation import NSObject, NSMakeRect, NSMakeSize, NSMakePoint, NSTimer
 from EventKit import EKEventStore, EKEntityTypeEvent
 
 # Use the existing request_access helper from poller.py so we get the same
@@ -623,10 +623,14 @@ class SettingsWindow(NSObject):
         if getattr(sys, "frozen", False):
             # Bundled .app: install/restart the LaunchAgent. Defer to the next
             # runloop tick so the status update paints before we block on
-            # launchctl — otherwise the window appears frozen and the user
-            # thinks "click did nothing".
+            # launchctl. Also start a 1Hz tick timer that animates dots after
+            # the status label so the user has visible feedback the work is
+            # progressing during the ~15s install window.
             if self._status_label:
-                self._status_label.setStringValue_("Installing background agent…")
+                self._status_label.setStringValue_("Installing background agent.")
+            self._install_dots = 1
+            self._install_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                1.0, self, "tickStatus:", None, True)
             self.performSelector_withObject_afterDelay_("doInstall:", None, 0.1)
         else:
             # Source mode (running setup_gui.py via venv python). The detected
@@ -658,7 +662,20 @@ class SettingsWindow(NSObject):
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "installFinished:", None, False)
 
+    def tickStatus_(self, timer):
+        # Cycle 1 -> 2 -> 3 -> 1 dots on the install status line so the user
+        # can see the worker is still alive.
+        self._install_dots = (self._install_dots % 3) + 1
+        if self._status_label:
+            self._status_label.setStringValue_(
+                "Installing background agent" + ("." * self._install_dots))
+
     def installFinished_(self, sender):
+        # Stop the dot-tick timer before showing the result alert or quitting.
+        timer = getattr(self, "_install_timer", None)
+        if timer is not None:
+            timer.invalidate()
+            self._install_timer = None
         err = getattr(self, "_install_error", None)
         if err is not None:
             self._show_modal_alert(
