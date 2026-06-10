@@ -69,7 +69,12 @@ def main():
         binary = args.app / "Contents" / "MacOS" / "MeetingNotifier"
         if not binary.exists():
             sys.exit(f".app binary not found at {binary}")
-        program_args = [str(binary)]
+        # The bundled binary routes on argv (see main.py): no args → setup GUI,
+        # "alert" → alert subprocess, anything else → poller daemon. The
+        # LaunchAgent MUST pass --daemon, or launchd launches the GUI on a
+        # KeepAlive loop instead of the poller. (Source mode below runs
+        # poller.py directly, which is already the daemon, so it needs no flag.)
+        program_args = [str(binary), "--daemon"]
         working_dir = args.app.parent     # cwd = directory containing the .app
     else:
         if not args.venv_python.exists():
