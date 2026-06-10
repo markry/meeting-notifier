@@ -470,12 +470,12 @@ class SettingsWindow(NSObject):
         self._cancel_button = cancel_btn
 
         status = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, btn_y + 6, WIN_W - PAD * 2 - btn_w * 2 - 24, 18))
+            NSMakeRect(PAD, btn_y + 2, WIN_W - PAD * 2 - btn_w * 2 - 24, 26))
         status.setBezeled_(False)
         status.setDrawsBackground_(False)
         status.setEditable_(False)
         status.setSelectable_(False)
-        status.setFont_(NSFont.systemFontOfSize_(12))
+        status.setFont_(NSFont.systemFontOfSize_(16))
         status.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(status)
         self._status_label = status
@@ -689,9 +689,13 @@ class SettingsWindow(NSObject):
             if self._cancel_button:
                 self._cancel_button.setEnabled_(True)
             return
-        # Modal success confirmation — keeps the window from just vanishing
-        # silently. NSAlert defaults to one OK button and runModal() blocks
-        # until the user clicks it, forcing acknowledgement.
+        # Hide the settings window BEFORE showing the success alert so the
+        # modal isn't visually offset above a now-irrelevant settings window.
+        # With nothing behind it, the modal sits cleanly on a blank screen at
+        # macOS's standard dialog position (~1/3 from the top, centered
+        # horizontally) - same placement Apple uses for system dialogs.
+        if self._window is not None:
+            self._window.orderOut_(None)
         self._show_modal_alert(
             "Installation successful",
             "MeetingNotifier is now running in the background. "
