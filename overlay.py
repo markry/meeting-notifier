@@ -196,13 +196,19 @@ class AlertController(NSObject):
         content.addSubview_(title_lbl)
         cursor_y -= title_h + 10
 
-        # "Starts in N minutes · at HH:MM" line
+        # "Starts in N minutes · at HH:MM" line, or "Already started · at HH:MM"
+        # for an in-progress meeting we're catching after the fact (the
+        # notify_in_progress_meetings code path uses a negative minutes_until
+        # to flag this).
         when_h = 32
-        minutes_word = "minute" if self._info.minutes_until == 1 else "minutes"
-        when_text = (
-            f"Starts in {self._info.minutes_until} {minutes_word}"
-            f"  ·  {self._info.start_str}"
-        )
+        if self._info.minutes_until < 0:
+            when_text = f"Already started  ·  {self._info.start_str}"
+        else:
+            minutes_word = "minute" if self._info.minutes_until == 1 else "minutes"
+            when_text = (
+                f"Starts in {self._info.minutes_until} {minutes_word}"
+                f"  ·  {self._info.start_str}"
+            )
         when_rect = NSMakeRect(20, cursor_y - when_h, _WIN_W - 40, when_h)
         when_lbl = self._make_label(when_rect, when_text,
                                     NSFont.systemFontOfSize_(22))

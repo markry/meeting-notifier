@@ -357,7 +357,10 @@ def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
     start_utc = datetime.fromtimestamp(
         event.startDate().timeIntervalSince1970(), tz=timezone.utc)
     start_local = start_utc.astimezone()
-    minutes_until = max(0, int((start_utc - now_utc).total_seconds() // 60))
+    # Negative means the meeting has already started (only reached when
+    # notify_in_progress_meetings=True). The overlay renders that case
+    # as "Already started" rather than "Starts in 0 minutes".
+    minutes_until = int((start_utc - now_utc).total_seconds() // 60)
     location = None
     if cfg.show_location:
         loc = event.location()
