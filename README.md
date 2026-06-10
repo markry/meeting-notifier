@@ -48,7 +48,7 @@ python3 -m venv "$HOME/Library/Application Support/meeting-notifier/venv"
 
 ## Configuration
 
-The GUI writes `~/.config/meeting-notifier/config.toml`. You can hand-edit it for things the GUI doesn't expose. See `config.example.toml` for a fully-commented reference. Common knobs:
+The GUI writes `~/.config/meeting-notifier/config.toml`. You can hand-edit it for things the GUI doesn't expose. **Beware that direct edits to the TOML file can be clobbered by running or re-running the GUI** — see [INSTALLATION.md](INSTALLATION.md) for the workaround. See `config.example.toml` for a fully-commented reference. Common knobs:
 
 | Key | Default | What it does |
 |-----|---------|--------------|
