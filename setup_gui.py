@@ -689,6 +689,14 @@ class SettingsWindow(NSObject):
             if self._cancel_button:
                 self._cancel_button.setEnabled_(True)
             return
+        # Modal success confirmation — keeps the window from just vanishing
+        # silently. NSAlert defaults to one OK button and runModal() blocks
+        # until the user clicks it, forcing acknowledgement.
+        self._show_modal_alert(
+            "Installation successful",
+            "MeetingNotifier is now running in the background. "
+            "You will get a large centered alert before each meeting "
+            "starts. Click OK to close this window.")
         NSApp.terminate_(None)
 
     def doQuit_(self, sender):
