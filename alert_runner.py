@@ -55,6 +55,10 @@ def main() -> int:
     p.add_argument("--start-str", required=True,
                    help="already-formatted local time, e.g. '9:30 AM'")
     p.add_argument("--minutes-until", type=int, required=True)
+    p.add_argument("--start-utc-iso", default=None,
+                   help="ISO-format datetime of the meeting start in UTC; "
+                        "when present the overlay refreshes the 'Starts in "
+                        "N minutes' line every 30s so it stays truthful")
     p.add_argument("--location", default=None)
     p.add_argument("--join-link", default=None)
     p.add_argument("--snooze-minutes", type=int, default=2)
@@ -67,12 +71,20 @@ def main() -> int:
                    help="if set, alert appears only on the current Space")
     args = p.parse_args()
 
+    start_utc = None
+    if args.start_utc_iso:
+        from datetime import datetime
+        try:
+            start_utc = datetime.fromisoformat(args.start_utc_iso)
+        except ValueError:
+            start_utc = None
     info = AlertInfo(
         title=args.title,
         start_str=args.start_str,
         minutes_until=args.minutes_until,
         location=args.location,
         join_link=args.join_link,
+        start_utc=start_utc,
     )
     result = show_alert(info,
                         snooze_minutes=args.snooze_minutes,

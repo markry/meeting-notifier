@@ -435,6 +435,7 @@ def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
         minutes_until=minutes_until,
         location=location,
         join_link=join,
+        start_utc=start_utc,
     )
 
 
@@ -502,6 +503,7 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
         "--title", info.title,
         "--start-str", info.start_str,
         "--minutes-until", str(info.minutes_until),
+        "--start-utc-iso", info.start_utc.isoformat(),
         "--snooze-minutes", str(cfg.snooze_minutes),
         "--timeout-seconds", str(cfg.alert_timeout_seconds),
         "--display-mode", cfg.display_mode,

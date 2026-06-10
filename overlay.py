@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import objc
 from AppKit import (
@@ -62,9 +63,15 @@ class _KeyableBorderlessWindow(NSWindow):
 class AlertInfo:
     title: str
     start_str: str           # already-formatted local time (e.g. "9:32 PM")
-    minutes_until: int       # e.g. 5
+    minutes_until: int       # e.g. 5; negative when the meeting has already started
     location: str | None     # may be None
     join_link: str | None    # may be None
+    # The actual start time as a timezone-aware datetime. When provided, the
+    # overlay schedules a timer that recomputes the "Starts in N minutes"
+    # line every 30s so an un-dismissed alert sitting on screen stays truthful
+    # as time passes (and eventually flips to "Already started at HH:MM"
+    # once the meeting begins). When None, the display is static.
+    start_utc: datetime | None = None
 
 
 # Window dimensions, used for layout math in multiple methods.
@@ -92,7 +99,16 @@ class AlertController(NSObject):
         self._all_spaces = bool(all_spaces)
         self._result = None
         self._windows = []
+        # Track every "Starts in N minutes" label across all satellite windows
+        # so we can refresh them on a timer tick.
+        self._when_labels = []
+        self._when_timer = None
         self._build_windows()
+        if self._info.start_utc is not None:
+            # 30s cadence catches each minute boundary within 30s and is light
+            # enough not to be noticed even if the alert sits for an hour.
+            self._when_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                30.0, self, "refreshWhen:", None, True)
         return self
 
     # ----- public (Python-callable only; not Cocoa selectors) -----
@@ -201,19 +217,14 @@ class AlertController(NSObject):
         # notify_in_progress_meetings code path uses a negative minutes_until
         # to flag this).
         when_h = 32
-        if self._info.minutes_until < 0:
-            when_text = f"Already started at {self._info.start_str}"
-        else:
-            minutes_word = "minute" if self._info.minutes_until == 1 else "minutes"
-            when_text = (
-                f"Starts in {self._info.minutes_until} {minutes_word}"
-                f"  ·  {self._info.start_str}"
-            )
+        when_text = self._compute_when_text(self._info.minutes_until)
         when_rect = NSMakeRect(20, cursor_y - when_h, _WIN_W - 40, when_h)
         when_lbl = self._make_label(when_rect, when_text,
                                     NSFont.systemFontOfSize_(22))
         when_lbl.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(when_lbl)
+        # Save for the timer refresh path.
+        self._when_labels.append(when_lbl)
         cursor_y -= when_h + 8
 
         # Optional location
@@ -293,6 +304,33 @@ class AlertController(NSObject):
         lbl.setAlignment_(NSCenterTextAlignment)
         return lbl
 
+    # ----- timer: refresh the "Starts in N minutes" line -----
+
+    @objc.python_method
+    def _compute_when_text(self, minutes_until: int) -> str:
+        if minutes_until < 0:
+            return f"Already started at {self._info.start_str}"
+        minutes_word = "minute" if minutes_until == 1 else "minutes"
+        return f"Starts in {minutes_until} {minutes_word}  ·  {self._info.start_str}"
+
+    def refreshWhen_(self, timer):
+        """Recompute minutes_until from start_utc vs now and update every
+        when-label across our satellite windows so an un-dismissed alert
+        stays truthful as time passes."""
+        if self._info.start_utc is None:
+            return
+        now_utc = datetime.now(timezone.utc)
+        minutes_until = int((self._info.start_utc - now_utc).total_seconds() // 60)
+        text = self._compute_when_text(minutes_until)
+        for lbl in self._when_labels:
+            lbl.setStringValue_(text)
+
+    @objc.python_method
+    def _stop_when_timer(self):
+        if self._when_timer is not None:
+            self._when_timer.invalidate()
+            self._when_timer = None
+
     # ----- private: button actions (called by AppKit on button click) -----
 
     @objc.python_method
@@ -301,23 +339,27 @@ class AlertController(NSObject):
             w.orderOut_(None)
 
     def dismiss_(self, sender):
+        self._stop_when_timer()
         self._hide_all_windows()
         self._result = "dismiss"
         _stop_app()
 
     def snooze_(self, sender):
+        self._stop_when_timer()
         self._hide_all_windows()
         self._result = "snooze"
         _stop_app()
 
     def openLink_(self, sender):
         if self._info.join_link:
+            self._stop_when_timer()
             self._hide_all_windows()
             webbrowser.open(self._info.join_link)
             self._result = "link"
             _stop_app()
 
     def timeoutFired_(self, timer):
+        self._stop_when_timer()
         self._hide_all_windows()
         if self._result is None:
             self._result = "timeout"
