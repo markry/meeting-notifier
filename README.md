@@ -98,6 +98,7 @@ tail -F "$HOME/Library/Logs/meeting-notifier/stdout.log" \
 launchctl bootout gui/$(id -u)/net.ryland.meeting-notifier
 rm ~/Library/LaunchAgents/net.ryland.meeting-notifier.plist
 rm -rf /Applications/MeetingNotifier.app
+tccutil reset Calendar net.ryland.meeting-notifier
 rm -rf ~/.config/meeting-notifier
 rm -rf ~/Library/Logs/meeting-notifier
 ```
