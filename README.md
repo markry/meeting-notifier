@@ -5,6 +5,7 @@ A small macOS background agent that pops a **large, screen-centered alert** befo
 - Reads meetings from any calendar Apple Calendar.app knows about (Google, iCloud, Exchange, M365, CalDAV — anything you've added to **System Settings → Internet Accounts**)
 - Big borderless alert window appears on every connected display, on every macOS Space (including over full-screen apps), a configurable number of minutes before each meeting
 - **Dismiss** / **Snooze** buttons; clickable join link (Zoom / Meet / Teams / Webex / GoToMeeting / BlueJeans / Whereby / Jitsi) auto-extracted from the event
+- **Hidden from screen sharing** by default — the alert shows on your own screen but is excluded from Zoom/Teams/Meet shares, screen recording, and screenshots, so your next-meeting list stays private (toggleable)
 - Persists across login as a launchd LaunchAgent
 
 ## Requirements
@@ -53,17 +54,19 @@ The GUI writes `~/.config/meeting-notifier/config.toml`. You can hand-edit it fo
 | Key | Default | What it does |
 |-----|---------|--------------|
 | `lead_time_minutes` | `5` | Alert N minutes before the meeting starts |
-| `poll_interval_seconds` | `60` | How often to check for upcoming events |
+| `poll_interval_seconds` | `20` | How often to check for upcoming events; lower fires the alert nearer your exact lead time |
 | `snooze_minutes` | `2` | Snooze button duration; alert re-fires after this many minutes |
 | `alert_timeout_seconds` | `0` | Auto-dismiss the alert after N seconds with no interaction (`0` = stay up until clicked) |
 | `display_mode` | `"all"` | `"all"` / `"main"` / `"focused"` — which display(s) show the alert |
 | `all_spaces` | `true` | Show across every macOS Space, including over full-screen apps |
+| `hide_from_screen_sharing` | `true` | Exclude the alert from screen capture / sharing / recording — it still shows on your own display, but not in a Zoom/Teams/Meet share, screen recording, or screenshot |
 | `skip_all_day` | `true` | Skip all-day events (holidays, OOO blocks) |
 | `skip_unaccepted_meetings` | `false` | Skip Tentative / Pending / Declined invitations; self-created events without an attendee list are treated as accepted |
 | `notify_in_progress_meetings` | `false` | Also alert for meetings already running when the notifier first sees them |
 | `skip_title_substrings` | `[]` | Skip events whose title contains any of these (case-insensitive) |
 | `show_location` | `true` | Show event location below the title |
-| `show_join_link` | `true` | Extract + show the first known-provider URL from the event body / location |
+| `show_join_link` | `true` | Extract + show a join URL from the event body / location |
+| `join_link_known_providers_only` | `true` | Only recognized providers (Zoom/Meet/Teams/Webex/…) become the clickable Join link; `false` falls back to the first URL found (convenient for in-house systems, but a phishing risk) |
 
 Each calendar to watch is its own `[[calendars]]` block:
 
@@ -106,6 +109,8 @@ rm -rf ~/Library/Logs/meeting-notifier
 ## Privacy
 
 This tool runs entirely on your local machine. It makes no network calls of its own — it only reads from Apple's local Calendar.app database via EventKit. Your event data never leaves your Mac.
+
+By default the alert window is also excluded from screen capture (`hide_from_screen_sharing = true`), so meeting titles and times don't show up in a screen share, recording, or screenshot — they remain visible only on your own display. This isn't foolproof across every capture tool, but it covers the mainstream screen-sharing apps.
 
 ## License
 

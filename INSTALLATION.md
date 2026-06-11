@@ -62,7 +62,7 @@ python3 install_launchagent.py --app /Applications/MeetingNotifier.app
 Both paths produce the same end state (config at `~/.config/meeting-notifier/config.toml`, LaunchAgent at `~/Library/LaunchAgents/net.ryland.meeting-notifier.plist`). The risks of mixing:
 
 - **TCC attribution.** When you double-click the .app from Finder, macOS attributes the Calendar permission to the bundle identity `net.ryland.meeting-notifier`. When you instead run the binary as a child of your shell (Terminal), macOS may attribute the request to *Terminal's* identity - which means Terminal gets the grant, not the bundle. Subsequent launchd-spawned daemons run as the bundle and won't see Terminal's grant.
-- **Config rewrites.** If you ran the GUI path, hand-edits to `config.toml` survive only until you re-launch the .app - because the GUI rewrites the file from its form fields on Save & Start and drops keys it doesn't know about (like `identifier`-based `[[calendars]]` entries and `poll_interval_seconds`). The TOML header that the GUI writes spells out this gotcha.
+- **Config rewrites.** If you ran the GUI path, hand-edits to `config.toml` survive only until you re-launch the .app - because the GUI rewrites the file from its form fields on Save & Start and drops keys it doesn't manage (notably `use_overlay` and `identifier`-based `[[calendars]]` entries, which the GUI re-writes by `title` + `source`). The TOML header that the GUI writes spells out this gotcha.
 
 **Recommendation**: pick one path per Mac. GUI for "I just want it working." CLI for "I'm managing everything from terminal anyway."
 
