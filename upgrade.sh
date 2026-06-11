@@ -9,8 +9,9 @@
 # daemon - while preserving your settings and your Calendar permission.
 #
 # Usage:
-#   1. Download the latest MeetingNotifier-X.Y.Z.zip from the project's
-#      Releases page (no need to unzip it).
+#   1. From the project's Releases page, download both this script and the
+#      latest MeetingNotifier-X.Y.Z.zip into the same folder (no need to
+#      unzip the .zip), e.g. ~/Downloads.
 #   2. Run one of:
 #        bash upgrade.sh                                   # uses newest zip in ~/Downloads
 #        bash upgrade.sh ~/Downloads/MeetingNotifier-X.Y.Z.zip   # explicit path

@@ -51,13 +51,14 @@ python3 -m venv "$HOME/Library/Application Support/meeting-notifier/venv"
 
 A background daemon runs from `/Applications`, and launchd keeps restarting it — so you can't just drag-replace the app. Use the bundled script, which stops the daemon, verifies and swaps in the new build, and restarts it. **Your settings and Calendar permission are preserved** — no reinstall or re-granting.
 
-1. Download the latest `MeetingNotifier-*.zip` from the [Releases page](../../releases) (no need to unzip).
-2. Grab [`upgrade.sh`](upgrade.sh) from this repo.
-3. Run it:
+1. From the [Releases page](../../releases), download **both** assets into the same folder (e.g. `~/Downloads`): the latest `MeetingNotifier-*.zip` (no need to unzip) and `upgrade.sh`.
+2. Run it:
    ```bash
-   bash upgrade.sh        # uses the newest MeetingNotifier-*.zip in ~/Downloads
-   # or pass the path:  bash upgrade.sh ~/Downloads/MeetingNotifier-X.Y.Z.zip
+   bash ~/Downloads/upgrade.sh    # uses the newest MeetingNotifier-*.zip in ~/Downloads
+   # or pass the zip path:  bash ~/Downloads/upgrade.sh ~/Downloads/MeetingNotifier-X.Y.Z.zip
    ```
+
+   (`upgrade.sh` also lives [in this repo](upgrade.sh) if you'd rather grab it there.)
 
 The script refuses anything that isn't signed with the project's Developer ID and notarized, so a tampered zip can't slip in.
 

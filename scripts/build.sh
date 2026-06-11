@@ -5,8 +5,10 @@
 # Outputs:
 #   dist/MeetingNotifier.app                  - signed + notarized + stapled
 #   dist/MeetingNotifier-X.Y.Z-notarize.zip   - the zip submitted to Apple
-#   dist/MeetingNotifier-X.Y.Z.zip            - the release zip (attach this
-#                                                to GitHub Releases)
+#   dist/MeetingNotifier-X.Y.Z.zip            - the release zip (cut the
+#                                                GitHub release with
+#                                                scripts/release.sh, which
+#                                                attaches this AND upgrade.sh)
 #
 # Env vars (override if your setup differs):
 #   VENV     - virtualenv with py2app + PyObjC installed.
@@ -123,3 +125,6 @@ ditto -c -k --keepParent "$APP" "$RELEASE_ZIP"
 echo "=== DONE ==="
 echo "Release zip: $RELEASE_ZIP"
 echo "Stapled bundle: $APP"
+echo
+echo "Next: cut the GitHub release (attaches the zip + upgrade.sh):"
+echo "  bash scripts/release.sh --notes-file NOTES.md"
