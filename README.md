@@ -112,6 +112,10 @@ This tool runs entirely on your local machine. It makes no network calls of its 
 
 By default the alert window is also excluded from screen capture (`hide_from_screen_sharing = true`), so meeting titles and times don't show up in a screen share, recording, or screenshot — they remain visible only on your own display. This isn't foolproof across every capture tool, but it covers the mainstream screen-sharing apps.
 
+## Contributing
+
+Contributions welcome via fork & pull request — see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the architecture invariants to keep in mind. All PRs are reviewed and merged by the maintainer.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
