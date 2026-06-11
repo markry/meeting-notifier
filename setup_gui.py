@@ -34,7 +34,7 @@ from AppKit import (
     NSWindowStyleMaskMiniaturizable, NSBackingStoreBuffered,
     NSColor, NSFont, NSTextField, NSButton, NSButtonTypeSwitch,
     NSBezelStyleRounded, NSScrollView, NSScrollerStyleLegacy,
-    NSView, NSPopUpButton,
+    NSView, NSPopUpButton, NSTextAlignmentCenter,
     NSScreen, NSAlert, NSAlertStyleInformational,
 )
 from Foundation import NSObject, NSMakeRect, NSMakeSize, NSMakePoint, NSTimer
@@ -59,9 +59,26 @@ LOG_DIR = Path.home() / "Library" / "Logs" / "meeting-notifier"
 LABEL = "net.ryland.meeting-notifier"
 
 # Window dimensions
-WIN_W = 720
-WIN_H = 735
+WIN_W = 628
+WIN_H = 708
 PAD = 20
+
+# Form column geometry: [ label | value field/popup | help text ], all rows
+# anchored at the left margin (PAD). Kept as constants so the int-field, popup,
+# and switch helpers stay in sync when the window width changes.
+LABEL_W = 250
+FIELD_W = 56
+COL_GAP = 10
+FIELD_X = PAD + LABEL_W + COL_GAP        # left edge of the value field / popup
+HELP_X = FIELD_X + FIELD_W + COL_GAP     # left edge of the help text
+
+# Bottom-right action buttons (Cancel stacked above Save & Start), tucked into
+# the empty space beside the Filtering checkboxes instead of a full-width row.
+BTN_W = 115
+BTN_H = 32
+# Filtering checkboxes are capped to this width so their (full-frame) click
+# target doesn't slip under the button column to their right.
+FILTER_SW_W = WIN_W - 2 * PAD - BTN_W - 12
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +415,7 @@ class SettingsWindow(NSObject):
             NSMakeRect(PAD, y, WIN_W - 2 * PAD, 20))
         intro.setStringValue_(
             "Choose which calendars to watch and tune how alerts behave. "
-            "Click Save to apply.")
+            "Click Save & Start to apply.")
         intro.setFont_(NSFont.systemFontOfSize_(13))
         intro.setTextColor_(NSColor.secondaryLabelColor())
         intro.setBezeled_(False)
@@ -497,23 +514,34 @@ class SettingsWindow(NSObject):
         y = self._add_switch(content, y, "hide_from_screen_sharing",
                              "Hide the alert from screen sharing / recording (still shows on your screen)")
 
-        # Filtering section
+        # Filtering section. A little extra gap above the header (the switch
+        # rows pack tighter than the Timing field rows, so this matches the
+        # roomier Timing→Display spacing). These checkboxes are width-capped so
+        # their click targets stay clear of the stacked action buttons.
+        y -= 8
         y = self._add_section_header(content, y, "Filtering")
         y = self._add_switch(content, y, "skip_all_day",
-                             "Skip all-day events")
+                             "Skip all-day events", width=FILTER_SW_W)
         y = self._add_switch(content, y, "skip_unaccepted_meetings",
-                             "Skip tentative / pending invitations (alert only for accepted meetings)")
+                             "Skip tentative / pending invitations (alert only for accepted meetings)",
+                             width=FILTER_SW_W)
         y = self._add_switch(content, y, "notify_in_progress_meetings",
-                             "Also alert for meetings already in progress when first discovered")
+                             "Also alert for meetings already in progress when first discovered",
+                             width=FILTER_SW_W)
         y = self._add_switch(content, y, "join_link_known_providers_only",
-                             "Only show join links from recognized providers (Zoom, Meet, Teams, …)")
+                             "Only show join links from known providers (Zoom, Meet, Teams, …)",
+                             width=FILTER_SW_W)
 
-        # Save / Quit buttons at the bottom
-        btn_w = 120
-        btn_h = 32
-        btn_y = PAD
+        # Action buttons, stacked (Cancel on top, Save & Start below) in the
+        # empty space to the right of the Filtering checkboxes — no separate
+        # full-width row at the very bottom. `y` here is the cursor just below
+        # the last checkbox.
+        btn_x = WIN_W - PAD - BTN_W
+        save_y = y + 2
+        cancel_y = save_y + BTN_H + 10
+
         save_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(WIN_W - PAD - btn_w, btn_y, btn_w, btn_h))
+            NSMakeRect(btn_x, save_y, BTN_W, BTN_H))
         save_btn.setTitle_("Save & Start")
         save_btn.setBezelStyle_(NSBezelStyleRounded)
         save_btn.setKeyEquivalent_("\r")
@@ -523,7 +551,7 @@ class SettingsWindow(NSObject):
         self._save_button = save_btn
 
         cancel_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(WIN_W - PAD - btn_w * 2 - 12, btn_y, btn_w, btn_h))
+            NSMakeRect(btn_x, cancel_y, BTN_W, BTN_H))
         cancel_btn.setTitle_("Cancel")
         cancel_btn.setBezelStyle_(NSBezelStyleRounded)
         cancel_btn.setTarget_(self)
@@ -531,13 +559,15 @@ class SettingsWindow(NSObject):
         content.addSubview_(cancel_btn)
         self._cancel_button = cancel_btn
 
+        # Save/install progress text along the bottom edge (full width, left of
+        # the button column's footprint), shown while the agent installs.
         status = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, btn_y + 2, WIN_W - PAD * 2 - btn_w * 2 - 24, 26))
+            NSMakeRect(PAD, PAD - 4, btn_x - PAD - 12, 22))
         status.setBezeled_(False)
         status.setDrawsBackground_(False)
         status.setEditable_(False)
         status.setSelectable_(False)
-        status.setFont_(NSFont.systemFontOfSize_(16))
+        status.setFont_(NSFont.systemFontOfSize_(13))
         status.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(status)
         self._status_label = status
@@ -565,7 +595,7 @@ class SettingsWindow(NSObject):
     @objc.python_method
     def _add_int_field(self, content, y, key, label, helptext):
         lbl = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, y - 20, 280, 20))
+            NSMakeRect(PAD, y - 20, LABEL_W, 20))
         lbl.setStringValue_(label)
         lbl.setBezeled_(False)
         lbl.setDrawsBackground_(False)
@@ -575,13 +605,14 @@ class SettingsWindow(NSObject):
         content.addSubview_(lbl)
 
         field = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD + 290, y - 22, 70, 22))
+            NSMakeRect(FIELD_X, y - 22, FIELD_W, 22))
         field.setStringValue_(str(self._settings.get(key, DEFAULTS[key])))
+        field.setAlignment_(NSTextAlignmentCenter)
         content.addSubview_(field)
         self._field_controls[key] = field
 
         help_lbl = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD + 370, y - 20, WIN_W - PAD * 2 - 370, 18))
+            NSMakeRect(HELP_X, y - 20, WIN_W - PAD - HELP_X, 18))
         help_lbl.setStringValue_(helptext)
         help_lbl.setBezeled_(False)
         help_lbl.setDrawsBackground_(False)
@@ -594,8 +625,11 @@ class SettingsWindow(NSObject):
 
     @objc.python_method
     def _add_popup(self, content, y, key, label, options):
+        # A popup renders its title lower in the bezel than a text field does,
+        # so nudge this label down 1px to meet the popup's text (the Timing
+        # rows don't need this because their value control is a field).
         lbl = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(PAD, y - 20, 280, 20))
+            NSMakeRect(PAD, y - 21, LABEL_W, 20))
         lbl.setStringValue_(label)
         lbl.setBezeled_(False)
         lbl.setDrawsBackground_(False)
@@ -604,8 +638,11 @@ class SettingsWindow(NSObject):
         lbl.setFont_(NSFont.systemFontOfSize_(13))
         content.addSubview_(lbl)
 
+        # This row's label ("Show alert on") is short, so place the popup just
+        # after it rather than out in the numeric-field column (FIELD_X), where
+        # it would float in empty space.
         popup = NSPopUpButton.alloc().initWithFrame_(
-            NSMakeRect(PAD + 290, y - 24, 280, 26))
+            NSMakeRect(PAD + 100, y - 19, 210, 22))
         current = self._settings.get(key, DEFAULTS[key])
         for (val, title) in options:
             popup.addItemWithTitle_(title)
@@ -618,9 +655,11 @@ class SettingsWindow(NSObject):
         return y - 32
 
     @objc.python_method
-    def _add_switch(self, content, y, key, label):
+    def _add_switch(self, content, y, key, label, width=None):
+        if width is None:
+            width = WIN_W - 2 * PAD
         cb = NSButton.alloc().initWithFrame_(
-            NSMakeRect(PAD, y - 22, WIN_W - 2 * PAD, 22))
+            NSMakeRect(PAD, y - 22, width, 22))
         cb.setButtonType_(NSButtonTypeSwitch)
         cb.setTitle_(label)
         if self._settings.get(key, DEFAULTS[key]):
