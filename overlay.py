@@ -27,6 +27,7 @@ from AppKit import (
     NSEvent, NSEventTypeApplicationDefined,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSWindowSharingNone,
 )
 from Foundation import (
     NSObject, NSMakeRect, NSMakePoint, NSTimer,
@@ -111,8 +112,9 @@ class AlertController(NSObject):
     """Owns one or more overlay windows (one per selected screen) and tracks
     the user's action."""
 
-    def initWithInfo_snoozeMinutes_displayMode_allSpaces_(
-            self, info, snooze_minutes, display_mode, all_spaces):
+    def initWithInfo_snoozeMinutes_displayMode_allSpaces_hideFromCapture_(
+            self, info, snooze_minutes, display_mode, all_spaces,
+            hide_from_capture):
         self = objc.super(AlertController, self).init()
         if self is None:
             return None
@@ -120,6 +122,7 @@ class AlertController(NSObject):
         self._snooze_minutes = snooze_minutes
         self._display_mode = display_mode
         self._all_spaces = bool(all_spaces)
+        self._hide_from_capture = bool(hide_from_capture)
         self._result = None
         self._windows = []
         # Track every "Starts in N minutes" label across all satellite windows
@@ -206,6 +209,15 @@ class AlertController(NSObject):
         win.setBackgroundColor_(NSColor.windowBackgroundColor())
         win.setHasShadow_(True)
         win.setMovableByWindowBackground_(True)
+
+        if self._hide_from_capture:
+            # Exclude this window from screen capture / sharing (Zoom, Teams,
+            # Meet, screenshots, screen recording). The window still renders on
+            # the local display; it's simply omitted from the captured
+            # composition, so viewers see whatever is behind it rather than the
+            # alert. Not foolproof across every capture path, but covers the
+            # common screen-sharing tools. See hide_from_screen_sharing config.
+            win.setSharingType_(NSWindowSharingNone)
 
         if self._all_spaces:
             behavior = win.collectionBehavior()
@@ -398,7 +410,8 @@ def show_alert(info: AlertInfo,
                snooze_minutes: int = 2,
                timeout_seconds: int = 0,
                display_mode: str = "all",
-               all_spaces: bool = True) -> str:
+               all_spaces: bool = True,
+               hide_from_screen_sharing: bool = True) -> str:
     """Display the overlay; block until user acts (or timeout, if enabled).
 
     Args:
@@ -412,14 +425,18 @@ def show_alert(info: AlertInfo,
             the focused app).
         all_spaces: if True (the default), the alert appears on every macOS
             Space simultaneously, including overlaying full-screen apps.
+        hide_from_screen_sharing: if True (the default), the alert window is
+            excluded from screen capture / sharing / recording (it still shows
+            on the local display). Keeps your next-meeting details out of a
+            shared screen.
 
     Returns one of: "dismiss", "snooze", "link", "timeout".
     """
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-    controller = AlertController.alloc().initWithInfo_snoozeMinutes_displayMode_allSpaces_(
-        info, snooze_minutes, display_mode, all_spaces)
+    controller = AlertController.alloc().initWithInfo_snoozeMinutes_displayMode_allSpaces_hideFromCapture_(
+        info, snooze_minutes, display_mode, all_spaces, hide_from_screen_sharing)
     controller.show()
 
     timer = None

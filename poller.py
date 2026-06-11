@@ -119,6 +119,12 @@ class Config:
     # trusted, reflex-click context. Leave True unless you rely on a custom
     # provider. (L2)
     join_link_known_providers_only: bool = True
+    # When True (default), the alert window is excluded from screen capture /
+    # sharing / recording (Zoom, Teams, Meet, screenshots). It still shows on
+    # the local display; viewers see whatever is behind it. Keeps your
+    # next-meeting details off a shared screen. Not foolproof across every
+    # capture path, but covers the common screen-sharing tools.
+    hide_from_screen_sharing: bool = True
 
 
 def _safe_write_text(path: Path, content: str, mode: int = 0o600) -> None:
@@ -181,6 +187,7 @@ def load_config(path: Path) -> Config:
         show_join_link=bool(data.get("show_join_link", True)),
         join_link_known_providers_only=bool(
             data.get("join_link_known_providers_only", True)),
+        hide_from_screen_sharing=bool(data.get("hide_from_screen_sharing", True)),
     )
     for entry in data.get("calendars", []):
         cfg.calendars.append(CalendarMatch(
@@ -542,6 +549,7 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
         "timeout_seconds": cfg.alert_timeout_seconds,
         "display_mode": cfg.display_mode,
         "all_spaces": cfg.all_spaces,
+        "hide_from_screen_sharing": cfg.hide_from_screen_sharing,
         "location": info.location,
         "join_link": info.join_link,
     }

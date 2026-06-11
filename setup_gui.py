@@ -60,7 +60,7 @@ LABEL = "net.ryland.meeting-notifier"
 
 # Window dimensions
 WIN_W = 720
-WIN_H = 705
+WIN_H = 735
 PAD = 20
 
 
@@ -77,6 +77,7 @@ DEFAULTS = {
     "alert_timeout_seconds": 0,
     "display_mode": "all",
     "all_spaces": True,
+    "hide_from_screen_sharing": True,
     "show_location": True,
     "show_join_link": True,
     "join_link_known_providers_only": True,
@@ -140,6 +141,7 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
         f"alert_timeout_seconds = {int(settings['alert_timeout_seconds'])}",
         f'display_mode = "{settings["display_mode"]}"',
         f"all_spaces = {'true' if settings['all_spaces'] else 'false'}",
+        f"hide_from_screen_sharing = {'true' if settings['hide_from_screen_sharing'] else 'false'}",
         f"show_location = {'true' if settings['show_location'] else 'false'}",
         f"show_join_link = {'true' if settings['show_join_link'] else 'false'}",
         f"join_link_known_providers_only = {'true' if settings['join_link_known_providers_only'] else 'false'}",
@@ -492,6 +494,8 @@ class SettingsWindow(NSObject):
                              ("focused", "Display with the focused app")])
         y = self._add_switch(content, y, "all_spaces",
                              "Show across all Spaces (including full-screen apps)")
+        y = self._add_switch(content, y, "hide_from_screen_sharing",
+                             "Hide the alert from screen sharing / recording (still shows on your screen)")
 
         # Filtering section
         y = self._add_section_header(content, y, "Filtering")

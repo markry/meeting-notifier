@@ -87,7 +87,9 @@ def _run_from_stdin_json() -> int:
                         snooze_minutes=int(data.get("snooze_minutes", 2)),
                         timeout_seconds=int(data.get("timeout_seconds", 0)),
                         display_mode=display_mode,
-                        all_spaces=bool(data.get("all_spaces", True)))
+                        all_spaces=bool(data.get("all_spaces", True)),
+                        hide_from_screen_sharing=bool(
+                            data.get("hide_from_screen_sharing", True)))
     return EXIT_CODES.get(result, EXIT_CODES["dismiss"])
 
 

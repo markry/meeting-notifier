@@ -47,6 +47,12 @@ display_mode = "all"
 # doesn't make you miss your next meeting.
 all_spaces = true
 
+# Exclude the alert window from screen capture / sharing / recording (Zoom,
+# Teams, Meet, screenshots). It still appears on your own display; viewers see
+# whatever is behind it, so your next-meeting details stay private. Default
+# true. Not foolproof across every capture path, but covers the common tools.
+hide_from_screen_sharing = true
+
 
 # ---- Calendars to watch ----------------------------------------------------
 
