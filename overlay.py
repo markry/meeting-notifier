@@ -13,20 +13,35 @@ the cleanliness of our NSWindow.close() calls.
 """
 from __future__ import annotations
 
+import platform
+import warnings
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import objc
+
+# Passing a CGColorRef (from NSColor.CGColor()) across the PyObjC bridge to set
+# a CALayer's border/background color makes PyObjC emit an ObjCPointerWarning,
+# because CGColor is an opaque CoreFoundation type it can't fully introspect.
+# The call is correct and the layer retains the color, so silence just this one
+# category to keep it out of the per-alert LaunchAgent logs.
+warnings.filterwarnings("ignore", category=objc.ObjCPointerWarning)
 from AppKit import (
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory,
-    NSWindow, NSScreen, NSColor, NSFont, NSTextField,
+    NSWindow, NSScreen, NSColor, NSFont, NSTextField, NSView,
     NSButton, NSWindowStyleMaskBorderless, NSBackingStoreBuffered,
     NSModalPanelWindowLevel, NSBezelStyleRounded,
     NSCenterTextAlignment,
     NSEvent, NSEventTypeApplicationDefined,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSVisualEffectView,
+    NSVisualEffectBlendingModeBehindWindow,
+    NSVisualEffectStateActive,
+    NSVisualEffectMaterialPopover,
+    NSVisualEffectMaterialHUDWindow,
+    NSVisualEffectMaterialWindowBackground,
     NSWindowSharingNone,
 )
 from Foundation import (
@@ -102,6 +117,56 @@ def minutes_until_display(start_utc: datetime, now_utc: datetime) -> int:
 _WIN_W = 720
 _WIN_H = 360
 
+# Corner radius of the floating alert card. macOS 26 (Tahoe) and its "Liquid
+# Glass" design language use chunkier rounding than the Big Sur-era panels, so
+# we widen the radius there to sit naturally next to system surfaces.
+_CORNER_RADIUS = 18.0
+_CORNER_RADIUS_TAHOE = 26.0
+
+# Accepted values for the `window_appearance` setting:
+#   "auto"  — translucent glass material that AUTOMATICALLY turns solid when the
+#             user has System Settings ▸ Accessibility ▸ Display ▸ "Reduce
+#             transparency" enabled. This is the default and is what the user
+#             means by "glass (or not) based on the Mac's own settings":
+#             NSVisualEffectView does that fallback for us, for free.
+#   "glass" — alias for "auto"; same behavior, named for discoverability.
+#   "solid" — always the opaque card (no vibrancy), regardless of system
+#             settings. The pre-glass look, kept for anyone who wants zero
+#             translucency.
+_VALID_APPEARANCES = {"auto", "glass", "solid"}
+
+
+def _macos_major() -> int:
+    """Major macOS version (e.g. 26 on Tahoe, 14 on Sonoma); 0 if unknown."""
+    try:
+        return int(platform.mac_ver()[0].split(".")[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+def _glass_material():
+    """Pick the NSVisualEffectView material for the running OS.
+
+    The material is *semantic*, not a fixed color: AppKit renders it according
+    to the current light/dark appearance, the accent color, and the
+    accessibility settings. On macOS 26 (Tahoe) these materials are re-rendered
+    with the Liquid Glass look automatically — so we get real glass on Tahoe and
+    the previous-generation frosted vibrancy on macOS 12–15, from one code path.
+
+    `.popover` is the floating-panel material — appearance-matched (so labelColor
+    text stays readable in both light and dark mode) and clearly translucent.
+    On Tahoe we prefer the more glass-forward HUD material when available.
+    """
+    if _macos_major() >= 26 and NSVisualEffectMaterialHUDWindow is not None:
+        return NSVisualEffectMaterialHUDWindow
+    if NSVisualEffectMaterialPopover is not None:
+        return NSVisualEffectMaterialPopover
+    return NSVisualEffectMaterialWindowBackground
+
+
+def _corner_radius() -> float:
+    return _CORNER_RADIUS_TAHOE if _macos_major() >= 26 else _CORNER_RADIUS
+
 
 # ---------------------------------------------------------------------------
 # Window controller
@@ -112,8 +177,8 @@ class AlertController(NSObject):
     """Owns one or more overlay windows (one per selected screen) and tracks
     the user's action."""
 
-    def initWithInfo_snoozeMinutes_displayMode_allSpaces_hideFromCapture_(
-            self, info, snooze_minutes, display_mode, all_spaces,
+    def initWithInfo_snoozeMinutes_displayMode_allSpaces_appearance_hideFromCapture_(
+            self, info, snooze_minutes, display_mode, all_spaces, appearance,
             hide_from_capture):
         self = objc.super(AlertController, self).init()
         if self is None:
@@ -122,6 +187,7 @@ class AlertController(NSObject):
         self._snooze_minutes = snooze_minutes
         self._display_mode = display_mode
         self._all_spaces = bool(all_spaces)
+        self._appearance = appearance if appearance in _VALID_APPEARANCES else "auto"
         self._hide_from_capture = bool(hide_from_capture)
         self._result = None
         self._windows = []
@@ -205,10 +271,9 @@ class AlertController(NSObject):
         )
         win.setLevel_(NSModalPanelWindowLevel)
         win.setReleasedWhenClosed_(False)
-        win.setOpaque_(True)
-        win.setBackgroundColor_(NSColor.windowBackgroundColor())
         win.setHasShadow_(True)
         win.setMovableByWindowBackground_(True)
+        self._install_background(win)
 
         if self._hide_from_capture:
             # Exclude this window from screen capture / sharing (Zoom, Teams,
@@ -226,6 +291,57 @@ class AlertController(NSObject):
             win.setCollectionBehavior_(behavior)
 
         return win
+
+    @objc.python_method
+    def _install_background(self, win):
+        """Replace the window's content view with a rounded card — either a
+        translucent NSVisualEffectView (glass) or an opaque layer-backed view
+        (solid), per the `window_appearance` setting.
+
+        Either way the window itself is made non-opaque with a clear background
+        so the rounded corners and the drop shadow hug the card shape rather
+        than a hard rectangle. `_populate` then adds labels/buttons to whichever
+        view we return as the content view (win.contentView()), so the rest of
+        the layout code is unchanged.
+        """
+        radius = _corner_radius()
+        # Non-opaque window + clear backing lets the rounded content show
+        # through; the OS shadow follows the visible (rounded) pixels.
+        win.setOpaque_(False)
+        win.setBackgroundColor_(NSColor.clearColor())
+
+        use_glass = (self._appearance in ("auto", "glass")
+                     and NSVisualEffectView is not None)
+
+        frame = NSMakeRect(0, 0, _WIN_W, _WIN_H)
+        if use_glass:
+            view = NSVisualEffectView.alloc().initWithFrame_(frame)
+            # behindWindow = sample what's *behind* the window (true glass),
+            # not the content within it. Active state keeps the material lit
+            # even though our borderless window never shows a title bar.
+            view.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+            view.setState_(NSVisualEffectStateActive)
+            view.setMaterial_(_glass_material())
+            # NSVisualEffectView automatically renders SOLID (its material's
+            # opaque fallback) when the user has "Reduce transparency" on, so
+            # the glass/solid choice already follows the Mac's own setting.
+        else:
+            view = NSView.alloc().initWithFrame_(frame)
+
+        view.setWantsLayer_(True)
+        layer = view.layer()
+        if layer is not None:
+            layer.setCornerRadius_(radius)
+            layer.setMasksToBounds_(True)
+            # Hairline inner edge — the faint light rim system glass panels have.
+            layer.setBorderWidth_(0.5)
+            layer.setBorderColor_(
+                NSColor.colorWithWhite_alpha_(1.0, 0.18).CGColor())
+            if not use_glass:
+                # Opaque card: paint the standard window background ourselves.
+                layer.setBackgroundColor_(
+                    NSColor.windowBackgroundColor().CGColor())
+        win.setContentView_(view)
 
     @objc.python_method
     def _populate(self, win):
@@ -411,6 +527,7 @@ def show_alert(info: AlertInfo,
                timeout_seconds: int = 0,
                display_mode: str = "all",
                all_spaces: bool = True,
+               window_appearance: str = "auto",
                hide_from_screen_sharing: bool = True) -> str:
     """Display the overlay; block until user acts (or timeout, if enabled).
 
@@ -425,6 +542,11 @@ def show_alert(info: AlertInfo,
             the focused app).
         all_spaces: if True (the default), the alert appears on every macOS
             Space simultaneously, including overlaying full-screen apps.
+        window_appearance: "auto"/"glass" (the default) renders the alert as a
+            translucent glass card — Liquid Glass on macOS 26, frosted vibrancy
+            on 12–15 — that automatically falls back to solid when the user has
+            "Reduce transparency" enabled in System Settings. "solid" forces the
+            opaque card regardless.
         hide_from_screen_sharing: if True (the default), the alert window is
             excluded from screen capture / sharing / recording (it still shows
             on the local display). Keeps your next-meeting details out of a
@@ -435,8 +557,9 @@ def show_alert(info: AlertInfo,
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
-    controller = AlertController.alloc().initWithInfo_snoozeMinutes_displayMode_allSpaces_hideFromCapture_(
-        info, snooze_minutes, display_mode, all_spaces, hide_from_screen_sharing)
+    controller = AlertController.alloc().initWithInfo_snoozeMinutes_displayMode_allSpaces_appearance_hideFromCapture_(
+        info, snooze_minutes, display_mode, all_spaces, window_appearance,
+        hide_from_screen_sharing)
     controller.show()
 
     timer = None

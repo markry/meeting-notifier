@@ -47,6 +47,16 @@ display_mode = "all"
 # doesn't make you miss your next meeting.
 all_spaces = true
 
+# Visual style of the alert window:
+#   "auto"  — translucent "glass" card (the default). Rendered as Liquid Glass
+#             on macOS 26 (Tahoe) and as frosted vibrancy on macOS 12–15. It
+#             automatically turns SOLID when you enable System Settings ▸
+#             Accessibility ▸ Display ▸ "Reduce transparency", so the look
+#             follows your Mac's own setting — no need to change anything here.
+#   "glass" — alias for "auto".
+#   "solid" — always an opaque card, ignoring the system transparency setting.
+window_appearance = "auto"
+
 # Exclude the alert window from screen capture / sharing / recording (Zoom,
 # Teams, Meet, screenshots). It still appears on your own display; viewers see
 # whatever is behind it, so your next-meeting details stay private. Default

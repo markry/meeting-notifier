@@ -52,6 +52,7 @@ EXIT_CODES = {
 
 
 _VALID_DISPLAY_MODES = {"all", "main", "focused"}
+_VALID_APPEARANCES = {"auto", "glass", "solid"}
 
 
 def _parse_iso(value):
@@ -75,6 +76,9 @@ def _run_from_stdin_json() -> int:
     display_mode = data.get("display_mode", "all")
     if display_mode not in _VALID_DISPLAY_MODES:
         display_mode = "all"
+    window_appearance = data.get("window_appearance", "auto")
+    if window_appearance not in _VALID_APPEARANCES:
+        window_appearance = "auto"
     info = AlertInfo(
         title=str(data.get("title", "(no title)")),
         start_str=str(data.get("start_str", "")),
@@ -88,6 +92,7 @@ def _run_from_stdin_json() -> int:
                         timeout_seconds=int(data.get("timeout_seconds", 0)),
                         display_mode=display_mode,
                         all_spaces=bool(data.get("all_spaces", True)),
+                        window_appearance=window_appearance,
                         hide_from_screen_sharing=bool(
                             data.get("hide_from_screen_sharing", True)))
     return EXIT_CODES.get(result, EXIT_CODES["dismiss"])
@@ -120,6 +125,10 @@ def main() -> int:
                    help="which display(s) to show the alert on")
     p.add_argument("--no-all-spaces", action="store_true",
                    help="if set, alert appears only on the current Space")
+    p.add_argument("--window-appearance", choices=["auto", "glass", "solid"],
+                   default="auto",
+                   help="glass card that follows the Mac's transparency "
+                        "setting (auto/glass), or a forced opaque card (solid)")
     args = p.parse_args()
 
     start_utc = None
@@ -141,7 +150,8 @@ def main() -> int:
                         snooze_minutes=args.snooze_minutes,
                         timeout_seconds=args.timeout_seconds,
                         display_mode=args.display_mode,
-                        all_spaces=not args.no_all_spaces)
+                        all_spaces=not args.no_all_spaces,
+                        window_appearance=args.window_appearance)
     return EXIT_CODES.get(result, EXIT_CODES["dismiss"])
 
 

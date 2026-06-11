@@ -98,6 +98,14 @@ class Config:
     # behavior. Snoozed re-fires already ignore the lead-time window, so this
     # only changes the initial-fire path.
     notify_in_progress_meetings: bool = False
+    # Visual style of the alert window:
+    #   "auto" (default) — translucent glass card (Liquid Glass on macOS 26,
+    #          frosted vibrancy on 12–15) that automatically renders solid when
+    #          the user has Accessibility ▸ "Reduce transparency" turned on, so
+    #          the look follows the Mac's own setting.
+    #   "glass" — alias for "auto".
+    #   "solid" — always the opaque card, ignoring system transparency settings.
+    window_appearance: str = "auto"
     # When True, skip events the user hasn't accepted (Tentative / Pending /
     # Declined invitations). Events with no attendees array — typically things
     # the user put on their own calendar without an invite flow — are treated
@@ -179,6 +187,7 @@ def load_config(path: Path) -> Config:
         display_mode=str(data.get("display_mode", "all")),
         all_spaces=bool(data.get("all_spaces", True)),
         notify_in_progress_meetings=bool(data.get("notify_in_progress_meetings", False)),
+        window_appearance=str(data.get("window_appearance", "auto")),
         skip_unaccepted_meetings=bool(data.get("skip_unaccepted_meetings", False)),
         use_overlay=bool(data.get("use_overlay", True)),
         skip_title_substrings=list(data.get("skip_title_substrings", [])),
@@ -549,6 +558,7 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
         "timeout_seconds": cfg.alert_timeout_seconds,
         "display_mode": cfg.display_mode,
         "all_spaces": cfg.all_spaces,
+        "window_appearance": cfg.window_appearance,
         "hide_from_screen_sharing": cfg.hide_from_screen_sharing,
         "location": info.location,
         "join_link": info.join_link,
