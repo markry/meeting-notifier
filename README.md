@@ -47,6 +47,22 @@ python3 -m venv "$HOME/Library/Application Support/meeting-notifier/venv"
 # Result: dist/MeetingNotifier.app
 ```
 
+## Upgrading
+
+A background daemon runs from `/Applications`, and launchd keeps restarting it — so you can't just drag-replace the app. Use the bundled script, which stops the daemon, verifies and swaps in the new build, and restarts it. **Your settings and Calendar permission are preserved** — no reinstall or re-granting.
+
+1. Download the latest `MeetingNotifier-*.zip` from the [Releases page](../../releases) (no need to unzip).
+2. Grab [`upgrade.sh`](upgrade.sh) from this repo.
+3. Run it:
+   ```bash
+   bash upgrade.sh        # uses the newest MeetingNotifier-*.zip in ~/Downloads
+   # or pass the path:  bash upgrade.sh ~/Downloads/MeetingNotifier-X.Y.Z.zip
+   ```
+
+The script refuses anything that isn't signed with the project's Developer ID and notarized, so a tampered zip can't slip in.
+
+> **Prefer to do it by hand?** Stop the daemon with `launchctl bootout gui/$(id -u)/net.ryland.meeting-notifier`, replace `/Applications/MeetingNotifier.app` with the new one, then open the app and click **Save & Start** (which restarts the daemon).
+
 ## Configuration
 
 The GUI writes `~/.config/meeting-notifier/config.toml`. You can hand-edit it for things the GUI doesn't expose. **Beware that direct edits to the TOML file can be clobbered by running or re-running the GUI** — see [INSTALLATION.md](INSTALLATION.md) for the workaround. See `config.example.toml` for a fully-commented reference. Common knobs:

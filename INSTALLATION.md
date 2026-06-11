@@ -75,6 +75,38 @@ rm -rf ~/.config/meeting-notifier
 ```
 Then start fresh with one path.
 
+## Upgrading an existing install
+
+You can't simply drag the new `.app` over the old one: a launchd daemon runs from `/Applications` and `KeepAlive` restarts it, so the file is in use and the old version keeps coming back. Upgrade cleanly one of two ways.
+
+### Script (recommended)
+
+Download the new `MeetingNotifier-*.zip` and the repo's `upgrade.sh`, then:
+
+```bash
+bash upgrade.sh                                       # newest zip in ~/Downloads
+bash upgrade.sh ~/Downloads/MeetingNotifier-X.Y.Z.zip  # or an explicit path
+```
+
+It verifies the new build is signed (the project's Developer ID) and notarized, stops the daemon, swaps the app into `/Applications`, clears the download-quarantine flag, and restarts the daemon. Your config (`~/.config/meeting-notifier/`) and Calendar permission are left untouched.
+
+### By hand
+
+```bash
+# 1. stop the daemon so KeepAlive doesn't fight the swap
+launchctl bootout gui/$(id -u)/net.ryland.meeting-notifier
+
+# 2. replace the app
+rm -rf /Applications/MeetingNotifier.app
+ditto ~/Downloads/MeetingNotifier.app /Applications/MeetingNotifier.app   # or drag-replace in Finder
+
+# 3. restart the daemon
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/net.ryland.meeting-notifier.plist
+launchctl kickstart -k gui/$(id -u)/net.ryland.meeting-notifier
+```
+
+Or, after step 2, just open the app and click **Save & Start** — the GUI reinstalls the LaunchAgent and restarts the daemon for you.
+
 ## Requirements
 
 - macOS 12 or later (developed against macOS 26).
