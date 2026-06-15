@@ -22,6 +22,7 @@ action):
   101 = snooze
   102 = link (user clicked the join link)
   103 = timeout (auto-dismissed)
+  104 = until_start (snooze until the meeting's start time)
   anything else = treated by the poller as a dispatch failure (retry next poll)
 
 Invocation:
@@ -44,10 +45,11 @@ from overlay import AlertInfo, show_alert
 # those low codes; poller.fire_alert treats anything not in this map as a
 # dispatch failure rather than a user action.
 EXIT_CODES = {
-    "dismiss": 100,
-    "snooze":  101,
-    "link":    102,
-    "timeout": 103,
+    "dismiss":     100,
+    "snooze":      101,
+    "link":        102,
+    "timeout":     103,
+    "until_start": 104,
 }
 
 
@@ -85,6 +87,7 @@ def _run_from_stdin_json() -> int:
     )
     result = show_alert(info,
                         snooze_minutes=int(data.get("snooze_minutes", 2)),
+                        final_snooze_minutes=int(data.get("final_snooze_minutes", 1)),
                         timeout_seconds=int(data.get("timeout_seconds", 0)),
                         display_mode=display_mode,
                         all_spaces=bool(data.get("all_spaces", True)),
@@ -113,6 +116,9 @@ def main() -> int:
     p.add_argument("--location", default=None)
     p.add_argument("--join-link", default=None)
     p.add_argument("--snooze-minutes", type=int, default=2)
+    p.add_argument("--final-snooze-minutes", type=int, default=1,
+                   help="shorter snooze offered when the meeting is closer "
+                        "than --snooze-minutes; shown as 'Final snooze M min'")
     p.add_argument("--timeout-seconds", type=int, default=0,
                    help="0 = no auto-dismiss (the default)")
     p.add_argument("--display-mode", choices=["all", "main", "focused"],
@@ -139,6 +145,7 @@ def main() -> int:
     )
     result = show_alert(info,
                         snooze_minutes=args.snooze_minutes,
+                        final_snooze_minutes=args.final_snooze_minutes,
                         timeout_seconds=args.timeout_seconds,
                         display_mode=args.display_mode,
                         all_spaces=not args.no_all_spaces)

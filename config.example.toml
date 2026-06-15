@@ -27,6 +27,17 @@ lookahead_seconds = 900   # 15 minutes
 # has already started.
 snooze_minutes = 2
 
+# Shorter "final snooze" offered as the meeting gets close. Once the meeting is
+# within `snooze_minutes` of starting, a normal snooze would land *after* the
+# start — so the alert's button instead reads "Final snooze N min" and defers
+# by this shorter amount, keeping the last reminder before the meeting begins.
+# Example: lead_time_minutes = 10, snooze_minutes = 5, final_snooze_minutes = 1
+# → first alert 10 min out with "Snooze 5 min"; after snoozing, the 5-min-out
+# alert shows "Final snooze 1 min" instead of an overshooting "Snooze 5 min".
+# Set to 0 (or any value >= snooze_minutes) to disable — the normal snooze is
+# then always used.
+final_snooze_minutes = 1
+
 # Auto-dismiss the alert after this many seconds with no interaction.
 # Set to 0 (the default) to disable auto-dismiss — the alert stays up
 # until you explicitly click Dismiss or Snooze. Useful if you might step

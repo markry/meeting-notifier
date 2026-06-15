@@ -60,7 +60,9 @@ LABEL = "net.ryland.meeting-notifier"
 
 # Window dimensions
 WIN_W = 628
-WIN_H = 708
+WIN_H = 688   # tightened: extra "Final snooze" Timing row added, but the
+              # calendars-header gap and the bottom dead space were both
+              # trimmed, netting a shorter window than 0.2.21's 708.
 PAD = 20
 
 # Form column geometry: [ label | value field/popup | help text ], all rows
@@ -91,6 +93,7 @@ DEFAULTS = {
     "poll_interval_seconds": 20,
     "lookahead_seconds": 900,
     "snooze_minutes": 2,
+    "final_snooze_minutes": 1,
     "alert_timeout_seconds": 0,
     "display_mode": "all",
     "all_spaces": True,
@@ -155,6 +158,7 @@ def save_settings(settings: dict, watched_calendars: list[dict]) -> None:
         f"poll_interval_seconds = {int(settings['poll_interval_seconds'])}",
         f"lookahead_seconds = {int(settings['lookahead_seconds'])}",
         f"snooze_minutes = {int(settings['snooze_minutes'])}",
+        f"final_snooze_minutes = {int(settings['final_snooze_minutes'])}",
         f"alert_timeout_seconds = {int(settings['alert_timeout_seconds'])}",
         f'display_mode = "{settings["display_mode"]}"',
         f"all_spaces = {'true' if settings['all_spaces'] else 'false'}",
@@ -430,7 +434,9 @@ class SettingsWindow(NSObject):
             NSMakeRect(PAD, y, WIN_W - 2 * PAD, 18),
             "Calendars to watch")
         content.addSubview_(header)
-        y -= 22
+        # 6px tail to match the other section headers (they return y - 24 from
+        # an 18px header) — was 22, which left an oddly large gap above the list.
+        y -= 6
 
         # Scrollable list of calendar checkboxes. Show ~4 rows by default;
         # scroll vertically when the user has more calendars. Keeps the window
@@ -498,6 +504,9 @@ class SettingsWindow(NSObject):
         y = self._add_int_field(content, y, "snooze_minutes",
                                 "Snooze button duration (minutes)",
                                 "Minutes Snooze defers the alert.")
+        y = self._add_int_field(content, y, "final_snooze_minutes",
+                                "Final snooze duration (minutes)",
+                                "Shorter snooze used when the meeting is close.")
         y = self._add_int_field(content, y, "alert_timeout_seconds",
                                 "Auto-dismiss after (seconds, 0 = never)",
                                 "0 = stays up until you click it.")

@@ -39,11 +39,14 @@ import subprocess
 from EventKit import EKEventStore, EKEntityTypeEvent
 from Foundation import NSRunLoop, NSDate
 
-from overlay import AlertInfo, minutes_until_display
+from overlay import AlertInfo, minutes_until_display, effective_snooze_minutes
                                 # AlertInfo: the data class passed to the alert
                                 # subprocess; minutes_until_display: shared
                                 # rounding so the first popup and the overlay's
-                                # 30s refresh agree on the minute shown.
+                                # 30s refresh agree on the minute shown;
+                                # effective_snooze_minutes: shared normal-vs-final
+                                # snooze decision so the button label and the
+                                # re-fire timing agree.
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,12 @@ class Config:
     poll_interval_seconds: int = 20
     lookahead_seconds: int = 900
     snooze_minutes: int = 2
+    # Shorter snooze offered once the meeting is closer than snooze_minutes, so
+    # the alert's Snooze button doesn't propose a delay that overshoots the
+    # start (the "meeting in 2 min, snooze for 3" nonsense). Shown as "Final
+    # snooze M min". Set <= 0 or >= snooze_minutes to disable (the normal snooze
+    # is used then). See overlay.effective_snooze_minutes for the exact rule.
+    final_snooze_minutes: int = 1
     # Auto-dismiss after N seconds if the user doesn't interact. 0 = never
     # auto-dismiss (alert stays up until clicked — the default, so you can
     # still see the alert if you were away from your desk when it fired).
@@ -175,6 +184,7 @@ def load_config(path: Path) -> Config:
         poll_interval_seconds=_clamp(int(data.get("poll_interval_seconds", 20)), 5, 20),
         lookahead_seconds=_clamp(int(data.get("lookahead_seconds", 900)), 60, 900),
         snooze_minutes=max(1, int(data.get("snooze_minutes", 2))),
+        final_snooze_minutes=max(0, int(data.get("final_snooze_minutes", 1))),
         alert_timeout_seconds=max(0, int(data.get("alert_timeout_seconds", 0))),
         display_mode=str(data.get("display_mode", "all")),
         all_spaces=bool(data.get("all_spaces", True)),
@@ -477,6 +487,7 @@ _EXIT_CODE_TO_RESULT = {
     101: "snooze",
     102: "link",
     103: "timeout",
+    104: "until_start",
 }
 
 
@@ -546,6 +557,7 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
         "minutes_until": info.minutes_until,
         "start_utc_iso": info.start_utc.isoformat(),
         "snooze_minutes": cfg.snooze_minutes,
+        "final_snooze_minutes": cfg.final_snooze_minutes,
         "timeout_seconds": cfg.alert_timeout_seconds,
         "display_mode": cfg.display_mode,
         "all_spaces": cfg.all_spaces,
@@ -642,8 +654,32 @@ def run_once(store, calendars, cfg: Config, fired: dict,
             # in fire_alert have already explained the crash.
             continue
         if result == "snooze":
-            snoozed_until[ident] = now_utc + timedelta(minutes=cfg.snooze_minutes)
+            # Mirror the duration the alert's button actually offered: a normal
+            # snooze, or the shorter "Final snooze" once the meeting is within
+            # snooze_minutes of starting. Recompute against a FRESH now (the
+            # alert may have sat on screen a while before the click) so the
+            # re-fire lands where the label the user clicked promised, and so a
+            # long-sitting alert that crossed into final-snooze territory uses
+            # the short interval rather than the stale fire-time decision.
+            snooze_now = datetime.now(timezone.utc)
+            start_utc = datetime.fromtimestamp(
+                event.startDate().timeIntervalSince1970(), tz=timezone.utc)
+            snooze_mins, _ = effective_snooze_minutes(
+                minutes_until_display(start_utc, snooze_now),
+                cfg.snooze_minutes, cfg.final_snooze_minutes)
+            snoozed_until[ident] = snooze_now + timedelta(minutes=snooze_mins)
             # Do NOT add to fired — we want to fire again after the snooze
+        elif result == "until_start":
+            # "Snooze until start": go quiet now, fire once when the meeting
+            # begins. The re-fire target is the event's start time itself.
+            # Don't mark fired, so the start-time alert still happens. The
+            # overlay disables this button once the meeting has started, so
+            # start_utc is normally in the future here; max() is a defensive
+            # floor (fire next cycle) in case it somehow isn't.
+            start_utc = datetime.fromtimestamp(
+                event.startDate().timeIntervalSince1970(), tz=timezone.utc)
+            snoozed_until[ident] = max(start_utc, datetime.now(timezone.utc))
+            # Do NOT add to fired — we want to fire again at the start time
         else:
             fired[ident] = datetime.fromtimestamp(
                 event.startDate().timeIntervalSince1970(), tz=timezone.utc)
