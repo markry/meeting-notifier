@@ -60,9 +60,11 @@ LABEL = "net.ryland.meeting-notifier"
 
 # Window dimensions
 WIN_W = 628
-WIN_H = 688   # tightened: extra "Final snooze" Timing row added, but the
-              # calendars-header gap and the bottom dead space were both
-              # trimmed, netting a shorter window than 0.2.21's 708.
+WIN_H = 712   # tightened the calendars-header gap and trimmed bottom dead
+              # space, but kept ~10px clearance below the lowest Filtering
+              # checkbox so the bottom-anchored install/status label (at y =
+              # PAD-4) doesn't overlap it during "Installing background agent…".
+              # Nets ~same height as 0.2.21's 708 despite the new Timing row.
 PAD = 20
 
 # Form column geometry: [ label | value field/popup | help text ], all rows
