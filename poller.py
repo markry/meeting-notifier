@@ -80,11 +80,12 @@ class Config:
     poll_interval_seconds: int = 20
     lookahead_seconds: int = 900
     snooze_minutes: int = 2
-    # Shorter snooze offered once the meeting is closer than snooze_minutes, so
+    # Final snooze offered once the meeting is closer than snooze_minutes, so
     # the alert's Snooze button doesn't propose a delay that overshoots the
-    # start (the "meeting in 2 min, snooze for 3" nonsense). Shown as "Final
-    # snooze M min". Set <= 0 or >= snooze_minutes to disable (the normal snooze
-    # is used then). See overlay.effective_snooze_minutes for the exact rule.
+    # start (the "meeting in 2 min, snooze for 3" nonsense). Instead of a fixed
+    # delay it re-fires this many minutes BEFORE the start; shown as "Snooze
+    # to M min before". Set <= 0 or >= snooze_minutes to disable (the normal
+    # snooze is used then). See overlay.effective_snooze_minutes for the rule.
     final_snooze_minutes: int = 1
     # Auto-dismiss after N seconds if the user doesn't interact. 0 = never
     # auto-dismiss (alert stays up until clicked — the default, so you can
@@ -654,20 +655,30 @@ def run_once(store, calendars, cfg: Config, fired: dict,
             # in fire_alert have already explained the crash.
             continue
         if result == "snooze":
-            # Mirror the duration the alert's button actually offered: a normal
-            # snooze, or the shorter "Final snooze" once the meeting is within
-            # snooze_minutes of starting. Recompute against a FRESH now (the
-            # alert may have sat on screen a while before the click) so the
-            # re-fire lands where the label the user clicked promised, and so a
-            # long-sitting alert that crossed into final-snooze territory uses
-            # the short interval rather than the stale fire-time decision.
+            # Mirror what the alert's button actually offered. Recompute against
+            # a FRESH now (the alert may have sat on screen a while before the
+            # click) so the re-fire lands where the clicked label promised, and
+            # so a long-sitting alert that crossed into final-snooze territory
+            # is treated as final rather than using the stale fire-time decision.
+            #
+            # Normal snooze: re-fire snooze_minutes from now.
+            # Final snooze ("Snooze to M min before", offered once the meeting
+            # is within snooze_minutes of starting): re-fire M minutes *before*
+            # the start, so the last reminder lands just ahead of the meeting.
+            # If that target is already past — we're within M minutes of start,
+            # or the meeting is underway (in-progress catch-up) — fall back to a
+            # fixed short re-nudge rather than re-firing instantly in a loop.
             snooze_now = datetime.now(timezone.utc)
             start_utc = datetime.fromtimestamp(
                 event.startDate().timeIntervalSince1970(), tz=timezone.utc)
-            snooze_mins, _ = effective_snooze_minutes(
+            snooze_mins, is_final = effective_snooze_minutes(
                 minutes_until_display(start_utc, snooze_now),
                 cfg.snooze_minutes, cfg.final_snooze_minutes)
-            snoozed_until[ident] = snooze_now + timedelta(minutes=snooze_mins)
+            target = start_utc - timedelta(minutes=snooze_mins) if is_final else None
+            if target is not None and target > snooze_now:
+                snoozed_until[ident] = target
+            else:
+                snoozed_until[ident] = snooze_now + timedelta(minutes=snooze_mins)
             # Do NOT add to fired — we want to fire again after the snooze
         elif result == "until_start":
             # "Snooze until start": go quiet now, fire once when the meeting

@@ -507,8 +507,9 @@ class SettingsWindow(NSObject):
                                 "Snooze button duration (minutes)",
                                 "Minutes Snooze defers the alert.")
         y = self._add_int_field(content, y, "final_snooze_minutes",
-                                "Final snooze duration (minutes)",
-                                "Shorter snooze used when the meeting is close.")
+                                "Final snooze lead (minutes before start)",
+                                "When the meeting is close, snooze re-fires "
+                                "this many minutes before it starts.")
         y = self._add_int_field(content, y, "alert_timeout_seconds",
                                 "Auto-dismiss after (seconds, 0 = never)",
                                 "0 = stays up until you click it.")

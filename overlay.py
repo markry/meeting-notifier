@@ -100,21 +100,23 @@ def minutes_until_display(start_utc: datetime, now_utc: datetime) -> int:
 
 def effective_snooze_minutes(minutes_until: int, snooze_minutes: int,
                              final_snooze_minutes: int) -> tuple[int, bool]:
-    """Decide which snooze duration to offer for a meeting `minutes_until` away.
+    """Decide which snooze the alert should offer for a meeting `minutes_until` away.
 
-    Normally we offer `snooze_minutes`. But once the meeting is closer than that
-    (snoozing the normal amount would skip past the start — the "meeting in 2
-    minutes, snooze for 3" nonsense), we offer the shorter `final_snooze_minutes`
-    instead so the next reminder still lands before the meeting begins. The
-    threshold is inclusive: at exactly `snooze_minutes` away a normal snooze
+    Normally we offer a fixed `snooze_minutes` delay. But once the meeting is
+    closer than that (snoozing the normal amount would skip past the start — the
+    "meeting in 2 minutes, snooze for 3" nonsense), we switch to the *final*
+    snooze: instead of a fixed delay, the alert re-fires `final_snooze_minutes`
+    before the start, so the last reminder still lands just ahead of the meeting.
+    The threshold is inclusive: at exactly `snooze_minutes` away a normal snooze
     would land right at the start, so that case takes the final snooze too.
 
     Negative `minutes_until` (an already-started meeting being caught by the
-    notify_in_progress_meetings path) also takes the final snooze — a short
-    re-nudge makes more sense than the full interval once it's underway.
+    notify_in_progress_meetings path) also reports is_final — poller then does a
+    short re-nudge, since "before the start" is already in the past.
 
-    Returns (minutes, is_final). When final_snooze is disabled (<= 0) or longer
-    than the normal snooze, the normal snooze is always used.
+    Returns (minutes, is_final). In final mode `minutes` is the lead before the
+    start (see poller.run_once); otherwise it's the delay from now. When the
+    final snooze is disabled (<= 0) or >= the normal snooze, normal is always used.
     """
     if (final_snooze_minutes and final_snooze_minutes > 0
             and final_snooze_minutes < snooze_minutes
@@ -155,7 +157,7 @@ class AlertController(NSObject):
         # so we can refresh them on a timer tick.
         self._when_labels = []
         # Track every Snooze button too: as the meeting nears, its label flips
-        # from "Snooze N min" to the shorter "Final snooze M min" (see
+        # from "Snooze N min" to the final "Snooze to M min before" (see
         # effective_snooze_minutes), and the timer refresh keeps it truthful for
         # an alert left sitting on screen across the threshold.
         self._snooze_buttons = []
@@ -411,8 +413,8 @@ class AlertController(NSObject):
     def _apply_default_button(self, minutes_until: int):
         """Assign the Return-key default to 'Snooze until start' while it's
         usable (meeting not yet started); once it greys out at/after the start,
-        the default falls to the Snooze button (by then labelled "Final
-        snooze") — never to Dismiss, so a stray Return can't permanently
+        the default falls to the Snooze button (by then labelled "Snooze
+        to M min before") — never to Dismiss, so a stray Return can't permanently
         silence the meeting. A button shows the blue default highlight when it
         holds the "\\r" key equivalent; only one button should hold it at once.
         The Snooze button keeps its plain 's' accelerator while it isn't the
@@ -430,8 +432,12 @@ class AlertController(NSObject):
     def _snooze_label(self, minutes_until: int) -> str:
         mins, is_final = effective_snooze_minutes(
             minutes_until, self._snooze_minutes, self._final_snooze_minutes)
-        prefix = "Final snooze" if is_final else "Snooze"
-        return f"{prefix} {mins} min"
+        if is_final:
+            # Final snooze re-fires M minutes *before the start*, not M minutes
+            # from now — so label it as a target ("Snooze to 1 min before"),
+            # matching what poller.run_once actually schedules.
+            return f"Snooze to {mins} min before"
+        return f"Snooze {mins} min"
 
     def refreshWhen_(self, timer):
         """Recompute minutes_until from start_utc vs now and update every

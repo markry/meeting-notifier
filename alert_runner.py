@@ -117,8 +117,9 @@ def main() -> int:
     p.add_argument("--join-link", default=None)
     p.add_argument("--snooze-minutes", type=int, default=2)
     p.add_argument("--final-snooze-minutes", type=int, default=1,
-                   help="shorter snooze offered when the meeting is closer "
-                        "than --snooze-minutes; shown as 'Final snooze M min'")
+                   help="final snooze offered when the meeting is closer than "
+                        "--snooze-minutes; re-fires this many minutes before "
+                        "the start; shown as 'Snooze to M min before'")
     p.add_argument("--timeout-seconds", type=int, default=0,
                    help="0 = no auto-dismiss (the default)")
     p.add_argument("--display-mode", choices=["all", "main", "focused"],
