@@ -125,6 +125,54 @@ def effective_snooze_minutes(minutes_until: int, snooze_minutes: int,
     return snooze_minutes, False
 
 
+# Once the meeting has already started there's no "before the start" left to aim
+# at, so both snooze buttons turn into plain "more time" re-nudges. The primary
+# button offers a short final_snooze_minutes nudge; the secondary offers this
+# longer fixed interval. Hard-coded (a sensible fixed value is fine here) and
+# shared by the overlay (button label) and poller.run_once (re-fire timing) so
+# the two always agree.
+POST_START_SNOOZE_MINUTES = 5
+
+
+def _plural_minutes(n: int) -> str:
+    return "minute" if n == 1 else "minutes"
+
+
+def primary_snooze_button(minutes_until: int, snooze_minutes: int,
+                          final_snooze_minutes: int) -> tuple[str, bool]:
+    """(title, enabled) for the primary Snooze button across the meeting's life.
+
+    Four phases as the meeting nears and then passes:
+      1. more than snooze_minutes away → "Snooze N min" (fixed N-from-now)
+      2. within the final window but still > final_snooze_minutes away →
+         "Snooze to M min before" (re-fires M min before the start)
+      3. within final_snooze_minutes of the start → same label but DISABLED:
+         a "M min before start" target is already in the past, so it's moot
+      4. meeting already started → "Snooze for M minute(s)" — a short re-nudge
+         for last-minute work, parallel to the secondary "Snooze for N minutes".
+    """
+    mins, is_final = effective_snooze_minutes(
+        minutes_until, snooze_minutes, final_snooze_minutes)
+    if minutes_until <= 0:
+        return f"Snooze for {mins} {_plural_minutes(mins)}", True
+    if is_final:
+        # Phase 3: grey out once inside the final lead — "to M min before" can
+        # no longer land before the start.
+        return f"Snooze to {mins} min before", minutes_until > final_snooze_minutes
+    return f"Snooze {mins} min", True
+
+
+def secondary_snooze_button(minutes_until: int) -> tuple[str, bool]:
+    """(title, enabled) for the secondary button: "Snooze until start" until the
+    meeting begins, then "Snooze for N minutes" (a fixed re-nudge) once it has,
+    so it stays useful for last-minute work instead of greying out. Always
+    enabled — which is why it can safely stay the Return-key default throughout."""
+    if minutes_until <= 0:
+        n = POST_START_SNOOZE_MINUTES
+        return f"Snooze for {n} {_plural_minutes(n)}", True
+    return "Snooze until start", True
+
+
 # Window dimensions, used for layout math in multiple methods.
 _WIN_W = 720
 _WIN_H = 360
@@ -156,18 +204,17 @@ class AlertController(NSObject):
         # Track every "Starts in N minutes" label across all satellite windows
         # so we can refresh them on a timer tick.
         self._when_labels = []
-        # Track every Snooze button too: as the meeting nears, its label flips
-        # from "Snooze N min" to the final "Snooze to M min before" (see
-        # effective_snooze_minutes), and the timer refresh keeps it truthful for
-        # an alert left sitting on screen across the threshold.
+        # Track every primary Snooze button: its title AND enabled state walk
+        # through the four phases of primary_snooze_button() as the meeting
+        # nears and passes, and the timer refresh keeps them truthful for an
+        # alert left sitting on screen across the thresholds.
         self._snooze_buttons = []
-        # Track the "Snooze until start" buttons so the timer refresh can
-        # disable them once the meeting has actually started (snoozing until a
-        # start that's already passed is meaningless).
+        # Track the secondary buttons ("Snooze until start" → "Snooze for N
+        # minutes" after the start, per secondary_snooze_button); the refresh
+        # timer relabels them as the meeting begins.
         self._until_start_buttons = []
-        # Track the Dismiss buttons too: "Snooze until start" is the default
-        # (Return) button, but once it's disabled at/after the start time the
-        # default falls back to Dismiss. The timer refresh keeps this in sync.
+        # Track the Dismiss buttons so _apply_default_button can keep them off
+        # the Return-key default (it always lives on the secondary button).
         self._dismiss_buttons = []
         self._when_timer = None
         self._build_windows()
@@ -348,29 +395,35 @@ class AlertController(NSObject):
         btn_y = 24
         first_x = (_WIN_W - total_w) / 2
 
+        snooze_title, snooze_enabled = primary_snooze_button(
+            self._info.minutes_until, self._snooze_minutes,
+            self._final_snooze_minutes)
         snooze = NSButton.alloc().initWithFrame_(
             NSMakeRect(first_x, btn_y, btn_w, btn_h))
-        snooze.setTitle_(self._snooze_label(self._info.minutes_until))
+        snooze.setTitle_(snooze_title)
         snooze.setBezelStyle_(NSBezelStyleRounded)
         snooze.setFont_(NSFont.systemFontOfSize_(16))
         snooze.setTarget_(self)
         snooze.setAction_("snooze:")
         snooze.setKeyEquivalent_("s")  # 's' key
+        # Greyed out in the final-lead window (see primary_snooze_button); the
+        # refresh timer re-enables it once the meeting starts as "Snooze N more".
+        snooze.setEnabled_(snooze_enabled)
         content.addSubview_(snooze)
         self._snooze_buttons.append(snooze)
 
+        until_title, until_enabled = secondary_snooze_button(
+            self._info.minutes_until)
         until = NSButton.alloc().initWithFrame_(
             NSMakeRect(first_x + (btn_w + gap), btn_y, btn_w, btn_h))
-        until.setTitle_("Snooze until start")
+        until.setTitle_(until_title)
         until.setBezelStyle_(NSBezelStyleRounded)
         until.setFont_(NSFont.systemFontOfSize_(16))
         until.setTarget_(self)
         until.setAction_("snoozeUntilStart:")
-        # Snoozing "until start" is meaningless once the meeting has already
-        # begun, so disable (but keep visible, so the row stays three-wide)
-        # when minutes_until has dropped to 0 or below. The refresh timer keeps
-        # this in sync for an alert left on screen across the start time.
-        until.setEnabled_(self._info.minutes_until > 0)
+        # Reads "Snooze until start" before the meeting, "Snooze for N minutes"
+        # after — always enabled, so the row stays three-wide and Return is safe.
+        until.setEnabled_(until_enabled)
         content.addSubview_(until)
         self._until_start_buttons.append(until)
 
@@ -384,9 +437,8 @@ class AlertController(NSObject):
         content.addSubview_(dismiss)
         self._dismiss_buttons.append(dismiss)
 
-        # Make "Snooze until start" the default (Return) button, falling back
-        # to Dismiss when it's disabled at/after the meeting start.
-        self._apply_default_button(self._info.minutes_until)
+        # The secondary button is always the Return default (it's never disabled).
+        self._apply_default_button()
 
     @staticmethod
     def _make_label(rect, text, font):
@@ -410,40 +462,28 @@ class AlertController(NSObject):
         return f"Starts in {minutes_until} {minutes_word}  ·  {self._info.start_str}"
 
     @objc.python_method
-    def _apply_default_button(self, minutes_until: int):
-        """Assign the Return-key default to 'Snooze until start' while it's
-        usable (meeting not yet started); once it greys out at/after the start,
-        the default falls to the Snooze button (by then labelled "Snooze
-        to M min before") — never to Dismiss, so a stray Return can't permanently
-        silence the meeting. A button shows the blue default highlight when it
-        holds the "\\r" key equivalent; only one button should hold it at once.
-        The Snooze button keeps its plain 's' accelerator while it isn't the
-        default."""
-        until_default = minutes_until > 0
+    def _apply_default_button(self):
+        """Keep the Return-key default on the secondary button. It's always an
+        enabled snooze ("Snooze until start" before the meeting, "Snooze for N
+        minutes" after), so Return can never land on Dismiss or on the primary
+        Snooze button while it's greyed out in the final-lead window. A button
+        shows the blue default highlight when it holds the "\\r" key equivalent;
+        only one button should hold it. The primary Snooze button keeps its
+        plain 's' accelerator."""
         for btn in self._until_start_buttons:
-            btn.setKeyEquivalent_("\r" if until_default else "")
+            btn.setKeyEquivalent_("\r")
         for btn in self._snooze_buttons:
-            btn.setKeyEquivalent_("s" if until_default else "\r")
+            btn.setKeyEquivalent_("s")
         # Dismiss is never the Return default.
         for btn in self._dismiss_buttons:
             btn.setKeyEquivalent_("")
 
-    @objc.python_method
-    def _snooze_label(self, minutes_until: int) -> str:
-        mins, is_final = effective_snooze_minutes(
-            minutes_until, self._snooze_minutes, self._final_snooze_minutes)
-        if is_final:
-            # Final snooze re-fires M minutes *before the start*, not M minutes
-            # from now — so label it as a target ("Snooze to 1 min before"),
-            # matching what poller.run_once actually schedules.
-            return f"Snooze to {mins} min before"
-        return f"Snooze {mins} min"
-
     def refreshWhen_(self, timer):
         """Recompute minutes_until from start_utc vs now and update every
-        when-label AND snooze button across our satellite windows so an
-        un-dismissed alert stays truthful as time passes — including the flip
-        from a normal snooze to the shorter final snooze as the meeting nears."""
+        when-label AND both snooze buttons across our satellite windows so an
+        un-dismissed alert stays truthful as time passes — including the title
+        flips and the primary button's enable/disable as the meeting nears and
+        then begins (see primary_snooze_button / secondary_snooze_button)."""
         if self._info.start_utc is None:
             return
         now_utc = datetime.now(timezone.utc)
@@ -451,15 +491,16 @@ class AlertController(NSObject):
         text = self._compute_when_text(minutes_until)
         for lbl in self._when_labels:
             lbl.setStringValue_(text)
-        snooze_text = self._snooze_label(minutes_until)
+        snooze_title, snooze_enabled = primary_snooze_button(
+            minutes_until, self._snooze_minutes, self._final_snooze_minutes)
         for btn in self._snooze_buttons:
-            btn.setTitle_(snooze_text)
-        # Disable "Snooze until start" once the meeting has begun, and move the
-        # Return-key default to Dismiss in that case.
-        until_enabled = minutes_until > 0
+            btn.setTitle_(snooze_title)
+            btn.setEnabled_(snooze_enabled)
+        until_title, until_enabled = secondary_snooze_button(minutes_until)
         for btn in self._until_start_buttons:
+            btn.setTitle_(until_title)
             btn.setEnabled_(until_enabled)
-        self._apply_default_button(minutes_until)
+        self._apply_default_button()
 
     @objc.python_method
     def _stop_when_timer(self):

@@ -39,7 +39,8 @@ import subprocess
 from EventKit import EKEventStore, EKEntityTypeEvent
 from Foundation import NSRunLoop, NSDate
 
-from overlay import AlertInfo, minutes_until_display, effective_snooze_minutes
+from overlay import (AlertInfo, minutes_until_display, effective_snooze_minutes,
+                     POST_START_SNOOZE_MINUTES)
                                 # AlertInfo: the data class passed to the alert
                                 # subprocess; minutes_until_display: shared
                                 # rounding so the first popup and the overlay's
@@ -681,16 +682,22 @@ def run_once(store, calendars, cfg: Config, fired: dict,
                 snoozed_until[ident] = snooze_now + timedelta(minutes=snooze_mins)
             # Do NOT add to fired — we want to fire again after the snooze
         elif result == "until_start":
-            # "Snooze until start": go quiet now, fire once when the meeting
-            # begins. The re-fire target is the event's start time itself.
-            # Don't mark fired, so the start-time alert still happens. The
-            # overlay disables this button once the meeting has started, so
-            # start_utc is normally in the future here; max() is a defensive
-            # floor (fire next cycle) in case it somehow isn't.
+            # Secondary button. Before the meeting it read "Snooze until start"
+            # → re-fire at the start itself. Once the meeting has begun the
+            # button no longer greys out — it reads "Snooze for N minutes" → a
+            # fixed re-nudge from now, so it stays useful for last-minute work.
+            # Recompute against a fresh now (the alert may have sat on screen,
+            # crossing the start) so the re-fire matches the clicked label.
+            # Don't mark fired either way, so a future alert still happens.
+            until_now = datetime.now(timezone.utc)
             start_utc = datetime.fromtimestamp(
                 event.startDate().timeIntervalSince1970(), tz=timezone.utc)
-            snoozed_until[ident] = max(start_utc, datetime.now(timezone.utc))
-            # Do NOT add to fired — we want to fire again at the start time
+            if start_utc > until_now:
+                snoozed_until[ident] = start_utc
+            else:
+                snoozed_until[ident] = until_now + timedelta(
+                    minutes=POST_START_SNOOZE_MINUTES)
+            # Do NOT add to fired — we want to fire again later
         else:
             fired[ident] = datetime.fromtimestamp(
                 event.startDate().timeIntervalSince1970(), tz=timezone.utc)
