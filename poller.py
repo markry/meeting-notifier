@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from join_links import find_join_link
+
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:
@@ -116,6 +118,12 @@ class Config:
     # everything that lives on the calendar" behavior.
     skip_unaccepted_meetings: bool = False
     use_overlay: bool = True   # False = print-stub (for headless / testing)
+    # For the print-stub path only: whether to include meeting title/location/
+    # join-URL in stdout. Default False redacts them when stdout is NOT a
+    # terminal (i.e. captured to LaunchAgent log files) so meeting PII doesn't
+    # leak into logs; an interactive terminal still shows them. Set True to log
+    # full details even in the background (opt-in).
+    log_meeting_details: bool = False
     calendars: list[CalendarMatch] = field(default_factory=list)
     skip_title_substrings: list[str] = field(default_factory=list)
     skip_all_day: bool = True
@@ -193,6 +201,7 @@ def load_config(path: Path) -> Config:
         notify_in_progress_meetings=bool(data.get("notify_in_progress_meetings", False)),
         skip_unaccepted_meetings=bool(data.get("skip_unaccepted_meetings", False)),
         use_overlay=bool(data.get("use_overlay", True)),
+        log_meeting_details=bool(data.get("log_meeting_details", False)),
         skip_title_substrings=list(data.get("skip_title_substrings", [])),
         skip_all_day=bool(data.get("skip_all_day", True)),
         show_location=bool(data.get("show_location", True)),
@@ -310,33 +319,8 @@ def upcoming_events(store: EKEventStore, calendars, lookahead_seconds: int):
 # ---------------------------------------------------------------------------
 
 
-# Known meeting-service URL patterns, in priority order. The extractor checks
-# these first so that — for example — a Google Meet link in event.location wins
-# over an unrelated tracking URL pasted into event.notes. Add more here as
-# needed; ordering within the list is "first match wins."
-PREFERRED_MEETING_PATTERNS = [
-    # Google Meet: https://meet.google.com/abc-defg-hij
-    re.compile(r"https?://meet\.google\.com/[a-z0-9?=&-]+", re.IGNORECASE),
-    # Zoom: https://zoom.us/j/1234567890 or https://us02web.zoom.us/j/...?pwd=...
-    re.compile(r"https?://[a-z0-9.-]*zoom\.us/j/\d+(?:\?[^\s<>\"'\)]*)?", re.IGNORECASE),
-    # Zoom personal meeting room: https://us02web.zoom.us/my/yourname
-    re.compile(r"https?://[a-z0-9.-]*zoom\.us/my/[\w/.-]+(?:\?[^\s<>\"'\)]*)?", re.IGNORECASE),
-    # Microsoft Teams: https://teams.microsoft.com/l/meetup-join/...
-    re.compile(r"https?://teams\.microsoft\.com/l/meetup-join/[^\s<>\"'\)]+", re.IGNORECASE),
-    # Webex: https://company.webex.com/meet/user or .../wbxmjs/...
-    re.compile(r"https?://[a-z0-9.-]*webex\.com/(?:meet|wbxmjs|join|j\.php)[^\s<>\"'\)]+", re.IGNORECASE),
-    # GoToMeeting
-    re.compile(r"https?://[a-z0-9.-]*gotomeeting\.com/join/\d+", re.IGNORECASE),
-    # BlueJeans
-    re.compile(r"https?://[a-z0-9.-]*bluejeans\.com/\d+(?:[?/][^\s<>\"'\)]*)?", re.IGNORECASE),
-    # Whereby
-    re.compile(r"https?://whereby\.com/[\w-]+", re.IGNORECASE),
-    # Jitsi
-    re.compile(r"https?://meet\.jit\.si/[^\s<>\"'\)]+", re.IGNORECASE),
-]
-
-# Fallback for "any URL" — used only when no known-provider pattern matched.
-_URL_RE_GENERIC = re.compile(r"https?://[^\s<>\"'\)]+")
+# Join-link matching (provider patterns + hostname validation) lives in
+# join_links.py — pure and unit-tested (see test_join_links.py).
 
 
 def should_skip(event, cfg: Config) -> bool:
@@ -388,16 +372,12 @@ def _user_response_not_accepted(event) -> bool:
 def extract_join_link(event, known_only: bool = True) -> str | None:
     """Pull the best candidate "join meeting" URL out of an event.
 
-    Strategy:
-      1. Concatenate all text-bearing fields (notes/location/URL).
-      2. Try each PREFERRED_MEETING_PATTERNS in order — a Google Meet link
-         beats an unrelated tracking URL, a Zoom link beats a calendar
-         invitation URL, etc.
-      3. If `known_only` is False, fall back to the first http(s) URL found
-         anywhere when no preferred pattern matched. When True (the default),
-         no generic fallback is used — an unrecognized URL is NOT turned into
-         a clickable Join button (anti-phishing; see Config.
-         join_link_known_providers_only).
+    Concatenates the text-bearing fields (notes/location/URL) and hands them to
+    `join_links.find_join_link`, which matches known providers in priority order
+    and validates each candidate's hostname. With `known_only` False it falls
+    back to the first http(s) URL; when True (the default) an unrecognized or
+    look-alike URL is NOT turned into a clickable Join button (anti-phishing;
+    see Config.join_link_known_providers_only).
     """
     parts = []
     for field_name in ("notes", "location", "URL"):
@@ -411,43 +391,7 @@ def extract_join_link(event, known_only: bool = True) -> str | None:
             val = val.absoluteString()
         parts.append(str(val))
     text = "\n".join(parts)
-
-    for pattern in PREFERRED_MEETING_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            return _trim_url(m.group(0))
-
-    if known_only:
-        return None
-    m = _URL_RE_GENERIC.search(text)
-    return _trim_url(m.group(0)) if m else None
-
-
-# Characters that can visually disguise the true target of a URL: ASCII
-# control chars (C0 + DEL) and Unicode bidi / zero-width formatting chars.
-# We strip these from URLs before storing or displaying so a malicious event
-# notes field can't include "https://goodco.com‮/evilco.com" that
-# right-to-left-overrides into the user's eye as the good domain.
-_URL_SAFE_STRIP = (
-    set(chr(c) for c in range(0x00, 0x20)) | {chr(0x7F)} |
-    {chr(c) for c in (
-        0x200B, 0x200C, 0x200D,                       # zero-width spaces / joiners
-        0x200E, 0x200F,                               # LRM/RLM
-        0x202A, 0x202B, 0x202C, 0x202D, 0x202E,       # bidi embeddings / overrides
-        0x2066, 0x2067, 0x2068, 0x2069,               # bidi isolates
-        0xFEFF,                                       # BOM / zero-width nbsp
-    )}
-)
-
-
-def _trim_url(url: str) -> str:
-    """Strip trailing punctuation the URL regex commonly over-captures, plus
-    any bidi / zero-width / control characters that could disguise the URL's
-    true target when rendered."""
-    url = "".join(c for c in url if c not in _URL_SAFE_STRIP)
-    while url and url[-1] in ".,;:!?>)]}'\"":
-        url = url[:-1]
-    return url
+    return find_join_link(text, known_only=known_only)
 
 
 def _build_alert_info(event, cfg: Config, now_utc: datetime) -> AlertInfo:
@@ -513,16 +457,22 @@ def fire_alert(event, cfg: Config, now_utc: datetime) -> str:
 
     if not cfg.use_overlay:
         # Headless print fallback (also useful for tests / launchd debugging).
+        # Redact meeting PII (title/location/join URL) when stdout is captured to
+        # a file (e.g. LaunchAgent logs) so it doesn't leak; show it at an
+        # interactive terminal, or whenever log_meeting_details is opted in.
+        show_details = cfg.log_meeting_details or sys.stdout.isatty()
         lines = [
             "=" * 56,
             "  ALERT:",
-            "  " + info.title,
+            ("  " + info.title) if show_details
+            else "  (meeting title redacted — set log_meeting_details=true to include)",
             f"  starts in {info.minutes_until} min ({info.start_str})",
         ]
-        if info.location:
-            lines.append("  location: " + info.location)
-        if info.join_link:
-            lines.append("  join: " + info.join_link)
+        if show_details:
+            if info.location:
+                lines.append("  location: " + info.location)
+            if info.join_link:
+                lines.append("  join: " + info.join_link)
         lines.append("=" * 56)
         print("\n".join(lines), flush=True)
         return "dismiss"

@@ -153,3 +153,17 @@ show_join_link = true
 # put an event on a watched calendar could surface a "Join (evil.example)"
 # button in a trusted, one-click context.
 join_link_known_providers_only = true
+
+
+# ---- Headless / logging ----------------------------------------------------
+
+# use_overlay = true is the normal mode (the on-screen alert window). When set
+# to false, the alert is instead printed to stdout — a headless / testing mode.
+# use_overlay = true
+
+# For the print-stub mode only: whether to include the meeting title, location,
+# and join URL in that stdout. Default false REDACTS them when stdout is
+# captured to a file (e.g. the LaunchAgent log), so meeting details don't leak
+# into logs; an interactive terminal still shows them. Set true to log the full
+# details even in the background.
+# log_meeting_details = false
