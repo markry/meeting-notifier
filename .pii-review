@@ -1,0 +1,20 @@
+Project: MeetingNotifier — a public, MIT-licensed macOS meeting-alert app
+(github.com/markry/meeting-notifier). It reads the user's calendar at RUNTIME
+on their own Mac; no calendar data belongs in the repo.
+
+ALLOWED (not PII in this repo):
+- "Mark Ryland" as the copyright holder / author name (LICENSE, docs) — he is
+  the public author of this OSS project. ALLOW.
+- Placeholder addresses in examples and tests: personal@gmail.com in
+  config.example.toml, zoom.us@evil.com in the join-link tests, anything
+  @example.com / @example.org. ALLOW.
+- Apple bundle/entitlement identifiers (com.apple.*) and generic macOS paths. ALLOW.
+
+WATCH ESPECIALLY (this app handles calendars):
+- real meeting titles, attendee names or emails, organizer names
+- real meeting join URLs (Zoom/Teams/Meet links with real meeting ids or
+  passcodes), real dial-in numbers
+- real calendar names or account emails from a test run, log output or screenshot
+- any real person's name other than Mark-as-author, or any third-party email
+- a real personal file path or username (e.g. /Users/<a real name>/...)
+- any Apple ID, app-specific password, notary credential, token or secret
