@@ -39,6 +39,10 @@ fi
 TAG="v${VERSION}"
 RELEASE_ZIP="dist/MeetingNotifier-${VERSION}.zip"
 UPGRADE="upgrade.sh"
+# Releases always go to the PUBLIC repo. Named explicitly because this clone
+# has two remotes (origin = private meeting-notifier-dev, public = this repo),
+# and a bare `gh release` would pick one of them for you.
+REPO="markry/meeting-notifier"
 
 if [ ! -f "$RELEASE_ZIP" ]; then
     echo "ERROR: $RELEASE_ZIP not found. Run scripts/build.sh first." >&2
@@ -49,14 +53,14 @@ if [ ! -f "$UPGRADE" ]; then
     exit 1
 fi
 
-if gh release view "$TAG" >/dev/null 2>&1; then
+if gh release view -R "$REPO" "$TAG" >/dev/null 2>&1; then
     echo "==> Release $TAG already exists - (re)uploading both assets (--clobber)"
-    gh release upload "$TAG" "$RELEASE_ZIP" "$UPGRADE" --clobber
+    gh release upload -R "$REPO" "$TAG" "$RELEASE_ZIP" "$UPGRADE" --clobber
 else
     echo "==> Creating release $TAG with both assets"
-    gh release create "$TAG" "$RELEASE_ZIP" "$UPGRADE" --title "$TAG" "$@"
+    gh release create -R "$REPO" "$TAG" "$RELEASE_ZIP" "$UPGRADE" --title "$TAG" "$@"
 fi
 
 echo "==> Assets on $TAG:"
-gh release view "$TAG" --json assets -q '.assets[] | "    \(.name)  (\(.size) bytes)"'
+gh release view -R "$REPO" "$TAG" --json assets -q '.assets[] | "    \(.name)  (\(.size) bytes)"'
 echo "==> Done."
